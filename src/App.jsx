@@ -3134,7 +3134,7 @@ export default function EduFreeApp() {
   );
 
   // ============ EDIT PROFILE PAGE ============
-  const EditProfilePage = () => {
+  const renderEditProfilePage = () => {
     const stateOptionExists = statesList.some((state) => state.code === profileForm.stateCode);
     const districtOptionExists = filteredDistricts.some((district) => district.code === profileForm.district);
 
@@ -4605,7 +4605,7 @@ export default function EduFreeApp() {
       case 'events': return <EventsPage />;
       case 'eventDetail': return <EventDetailPage />;
       case 'profile': return <ProfilePage />;
-      case 'editProfile': return <EditProfilePage />;
+      case 'editProfile': return renderEditProfilePage();
       case 'certificates': return <CertificatesPage />;
       case 'notifications': return <NotificationsPage />;
       case 'settings': return <SettingsPage />;
