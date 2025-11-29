@@ -950,6 +950,7 @@ export default function EduFreeApp() {
         id: user.id,
         first_name: updatedProfile.firstName,
         last_name: updatedProfile.lastName,
+        email: updatedProfile.email,
         nos_id: updatedProfile.nosId,
         class_id: Number.isNaN(classId) ? null : classId,
         phone: updatedProfile.phone,
