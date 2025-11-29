@@ -1,4 +1,6 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import AdminPanel from './AdminPanel.jsx';
+import { supabase } from './lib/supabase';
 
 // Custom Icons as SVG components
 const Icons = {
@@ -289,30 +291,698 @@ export default function EduFreeApp() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [selectedCourse, setSelectedCourse] = useState(null);
   const [selectedClass, setSelectedClass] = useState('10');
+  const selectedClassRef = useRef(selectedClass);
   const [showPassword, setShowPassword] = useState(false);
   const [authTab, setAuthTab] = useState('login');
   const [quizStep, setQuizStep] = useState(0);
   const [selectedAnswers, setSelectedAnswers] = useState({});
   const [selectedEvent, setSelectedEvent] = useState(null);
-  
-  // User Profile State
-  const [userProfile, setUserProfile] = useState({
-    firstName: 'Arjun',
-    lastName: 'Kumar',
-    email: 'arjun.kumar@email.com',
-    phone: '+91 98765 43210',
-    nosId: 'NOS-2024-78542',
-    class: 'X',
-    dateOfBirth: '2008-05-15',
-    gender: 'Male',
-    address: '123 Main Street, Chennai',
-    state: 'Tamil Nadu',
-    pincode: '600001',
-    parentName: 'Rajesh Kumar',
-    parentPhone: '+91 98765 43211',
-    school: 'National Open School',
-    avatar: 'A',
+  const [subjects, setSubjects] = useState([]);
+  const [subjectsLoading, setSubjectsLoading] = useState(false);
+  const [subjectsError, setSubjectsError] = useState(null);
+  const [subjectsReloadKey, setSubjectsReloadKey] = useState(0);
+  const [subjectLessonMap, setSubjectLessonMap] = useState({});
+  const [studentProgress, setStudentProgress] = useState([]);
+  const [progressLoading, setProgressLoading] = useState(false);
+  const [dashboardStats, setDashboardStats] = useState({
+    courses: 0,
+    videosCompleted: 0,
+    hoursLearnedSeconds: 0,
+    achievements: 0,
   });
+  const [userProfile, setUserProfile] = useState({
+    firstName: '',
+    lastName: '',
+    email: '',
+    phone: '',
+    nosId: '',
+    class: '',
+    dateOfBirth: '',
+    gender: '',
+    address: '',
+    stateCode: '',
+    pincode: '',
+    parentName: '',
+    parentPhone: '',
+    school: '',
+    avatar: '',
+    district: '',
+  });
+  const [statesList, setStatesList] = useState([]);
+  const [districtsList, setDistrictsList] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [eventsLoading, setEventsLoading] = useState(false);
+  const [eventsError, setEventsError] = useState(null);
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState(null);
+  const [staffProfile, setStaffProfile] = useState(null);
+  const [userRole, setUserRole] = useState('student');
+  const [profileError, setProfileError] = useState(null);
+  const [notifications, setNotifications] = useState([]);
+  const [profileForm, setProfileForm] = useState({
+    firstName: '',
+    lastName: '',
+    nosId: '',
+    dateOfBirth: '',
+    gender: '',
+    email: '',
+    phone: '',
+    address: '',
+    stateCode: '',
+    district: '',
+    pincode: '',
+    class: '',
+    parentName: '',
+    parentPhone: '',
+    school: '',
+  });
+  const loginEmailRef = useRef(null);
+  const loginPasswordRef = useRef(null);
+  const registerFirstNameRef = useRef(null);
+  const registerLastNameRef = useRef(null);
+  const registerNosIdRef = useRef(null);
+  const registerEmailRef = useRef(null);
+  const registerClassRef = useRef(null);
+  const registerPasswordRef = useRef(null);
+  const forgotEmailRef = useRef(null);
+  const [isAdminUser, setIsAdminUser] = useState(false);
+  const [forgotLoading, setForgotLoading] = useState(false);
+
+  const showNotification = useCallback((type, message) => {
+    if (!message) return;
+    const id = `${Date.now()}-${Math.random()}`;
+    setNotifications((prev) => [...prev, { id, type, message }]);
+    setTimeout(() => {
+      setNotifications((prev) => prev.filter((note) => note.id !== id));
+    }, type === 'error' ? 6000 : 4000);
+  }, []);
+
+  const dismissNotification = useCallback((id) => {
+    setNotifications((prev) => prev.filter((note) => note.id !== id));
+  }, []);
+
+  const toastThemes = {
+    success: { icon: '✅', accent: '#4ade80' },
+    error: { icon: '⚠️', accent: '#f87171' },
+    info: { icon: 'ℹ️', accent: '#38bdf8' },
+  };
+
+  const raiseAuthError = useCallback((message) => {
+    setAuthError(message);
+    showNotification('error', message);
+  }, [showNotification]);
+
+  const raiseProfileError = useCallback((message) => {
+    setProfileError(message);
+    showNotification('error', message);
+  }, [showNotification]);
+
+  const updateProfileForm = useCallback((field, value) => {
+    setProfileForm(prev => ({
+      ...prev,
+      [field]: value,
+      ...(field === 'stateCode' ? { district: '' } : {}),
+    }));
+  }, []);
+
+  async function hydrateUserFromSupabase(currentUser) {
+    try {
+      const metadata = currentUser.user_metadata || {};
+      const metadataClass = metadata.class;
+      const profileComplete = metadata.profileComplete === true;
+
+      const { data: profileRow, error: profileErrorDb } = await supabase
+        .from('student_profiles')
+        .select('*')
+        .eq('id', currentUser.id)
+        .maybeSingle();
+      const { data: staffRow, error: staffError } = await supabase
+        .from('staff')
+        .select('role, state_code, district_code, subject_id, assigned_classes')
+        .eq('user_id', currentUser.id)
+        .maybeSingle();
+      if (staffError && staffError.code !== 'PGRST116') {
+        console.error('Error loading staff profile from Supabase:', staffError);
+      }
+
+      const role = staffRow?.role || 'student';
+      const nextProfile = {
+        firstName: profileRow?.first_name || metadata.firstName || '',
+        lastName: profileRow?.last_name || metadata.lastName || '',
+        email: currentUser.email || '',
+        phone: profileRow?.phone || metadata.phone || '',
+        nosId: profileRow?.nos_id || metadata.nosId || '',
+        class: profileRow?.class_id ? String(profileRow.class_id) : metadataClass || '',
+        dateOfBirth: profileRow?.date_of_birth || metadata.dateOfBirth || '',
+        gender: profileRow?.gender || metadata.gender || '',
+        address: metadata.address || '',
+        stateCode: profileRow?.state_code || metadata.stateCode || '',
+        pincode: profileRow?.pincode || metadata.pincode || '',
+        parentName: profileRow?.parent_name || metadata.parentName || '',
+        parentPhone: profileRow?.parent_phone || metadata.parentPhone || '',
+        school: profileRow?.school || metadata.school || '',
+        avatar: profileRow?.avatar_url || metadata.avatar || '',
+        district: profileRow?.district || metadata.district || '',
+      };
+
+      if (!profileErrorDb && profileRow?.class_id) {
+        setSelectedClass(String(profileRow.class_id));
+      } else if (metadataClass) {
+        setSelectedClass(String(metadataClass));
+      }
+
+      setStaffProfile(staffRow || null);
+      setUserRole(role);
+      setIsAdminUser(role !== 'student');
+      setUserProfile(nextProfile);
+      if (role !== 'student') {
+        setCurrentPage('admin');
+      } else {
+        setCurrentPage(profileComplete ? 'dashboard' : 'editProfile');
+      }
+    } catch (err) {
+      console.error('Error hydrating user profile from Supabase:', err);
+    }
+  }
+
+  const formatDuration = (seconds) => {
+    if (!seconds || seconds <= 0) {
+      return '0h';
+    }
+
+    if (seconds < 3600) {
+      const minutes = Math.max(1, Math.round(seconds / 60));
+      return `${minutes}m`;
+    }
+
+    const hours = seconds / 3600;
+    return hours >= 10 ? `${Math.round(hours)}h` : `${hours.toFixed(1)}h`;
+  };
+
+  useEffect(() => {
+    async function loadSubjects() {
+      try {
+        setSubjectsLoading(true);
+        setSubjectsError(null);
+
+        const classId = parseInt(selectedClass, 10);
+        let query = supabase.from('subjects').select('*');
+        if (!Number.isNaN(classId)) {
+          query = query.eq('class_id', classId);
+        }
+
+        const { data, error } = await query;
+
+        if (error) {
+          throw error;
+        }
+
+        setSubjects(data || []);
+      } catch (err) {
+        console.error('Error loading subjects from Supabase:', err);
+        setSubjectsError(err.message || 'Failed to load subjects');
+      } finally {
+        setSubjectsLoading(false);
+      }
+    }
+
+    loadSubjects();
+  }, [selectedClass, subjectsReloadKey]);
+
+  useEffect(() => {
+    async function loadRegions() {
+      try {
+        const [{ data: statesData, error: statesError }, { data: districtsData, error: districtsError }] = await Promise.all([
+          supabase.from('states').select('code, name').order('name', { ascending: true }),
+          supabase.from('districts').select('code, name, state_code').order('name', { ascending: true }),
+        ]);
+        if (statesError) throw statesError;
+        if (districtsError) throw districtsError;
+        setStatesList(statesData || []);
+        setDistrictsList(districtsData || []);
+      } catch (err) {
+        console.error('Error loading regions from Supabase:', err);
+      }
+    }
+    loadRegions();
+  }, []);
+
+  useEffect(() => {
+    async function loadClassStructure() {
+      if (!subjects.length) {
+        setSubjectLessonMap({});
+        return;
+      }
+
+      const subjectIds = subjects
+        .map(subject => subject.id)
+        .filter(id => id !== null && id !== undefined && `${id}`.trim() !== '');
+
+      if (!subjectIds.length) {
+        setSubjectLessonMap({});
+        return;
+      }
+
+      try {
+        const { data: chaptersData, error: chaptersError } = await supabase
+          .from('chapters')
+          .select('id, subject_id')
+          .in('subject_id', subjectIds);
+
+        if (chaptersError) {
+          throw chaptersError;
+        }
+
+        const chapterIds = (chaptersData || []).map(chapter => chapter.id);
+        const chapterToSubject = {};
+        (chaptersData || []).forEach(chapter => {
+          chapterToSubject[chapter.id] = chapter.subject_id;
+        });
+
+        let lessonsData = [];
+        if (chapterIds.length) {
+          const { data: lessonsResp, error: lessonsError } = await supabase
+            .from('lessons')
+            .select('id, chapter_id')
+            .in('chapter_id', chapterIds);
+
+          if (lessonsError) {
+            throw lessonsError;
+          }
+
+          lessonsData = lessonsResp || [];
+        }
+
+        const map = {};
+        subjectIds.forEach(id => {
+          map[String(id)] = [];
+        });
+
+        lessonsData.forEach(lesson => {
+          const subjectId = chapterToSubject[lesson.chapter_id];
+          if (subjectId === undefined || subjectId === null) {
+            return;
+          }
+          const key = String(subjectId);
+          if (!map[key]) {
+            map[key] = [];
+          }
+          map[key].push(lesson.id);
+        });
+
+        setSubjectLessonMap(map);
+      } catch (err) {
+        console.error('Error loading class structure from Supabase:', err);
+      }
+    }
+
+    loadClassStructure();
+  }, [subjects]);
+
+  useEffect(() => {
+    selectedClassRef.current = selectedClass;
+  }, [selectedClass]);
+  useEffect(() => {
+    async function loadInitialUser() {
+      try {
+        const { data, error } = await supabase.auth.getUser();
+
+        if (error) {
+          console.error('Error getting current user from Supabase:', error);
+          return;
+        }
+
+        if (data?.user) {
+          setUser(data.user);
+          await hydrateUserFromSupabase(data.user);
+        }
+      } catch (err) {
+        console.error('Error loading current user from Supabase:', err);
+      }
+    }
+
+    loadInitialUser();
+  }, []);
+
+  useEffect(() => {
+    async function loadEvents() {
+      try {
+        setEventsLoading(true);
+        setEventsError(null);
+
+        const { data, error } = await supabase
+          .from('events')
+          .select('*')
+          .order('event_date', { ascending: true })
+          .order('event_time', { ascending: true });
+
+        if (error) {
+          throw error;
+        }
+
+        setEvents(data || []);
+        if (!selectedEvent && data && data.length > 0) {
+          setSelectedEvent(data[0]);
+        }
+      } catch (err) {
+        console.error('Error loading events from Supabase:', err);
+        setEventsError(err.message || 'Failed to load events');
+      } finally {
+        setEventsLoading(false);
+      }
+    }
+
+    loadEvents();
+  }, []);
+
+  useEffect(() => {
+    async function loadStudentProgress() {
+      if (!user?.id) {
+        setStudentProgress([]);
+        return;
+      }
+
+      try {
+        setProgressLoading(true);
+        const { data, error } = await supabase
+          .from('student_progress')
+          .select('lesson_id, watched_seconds, completed')
+          .eq('student_id', user.id);
+
+        if (error) {
+          throw error;
+        }
+
+        setStudentProgress(data || []);
+      } catch (err) {
+        console.error('Error loading student progress from Supabase:', err);
+      } finally {
+        setProgressLoading(false);
+      }
+    }
+
+    loadStudentProgress();
+  }, [user]);
+
+  useEffect(() => {
+    const totalCourses = subjects.length;
+    const videosCompleted = studentProgress.filter(entry => entry.completed).length;
+    const totalWatchedSeconds = studentProgress.reduce(
+      (sum, entry) => sum + (entry.watched_seconds || 0),
+      0,
+    );
+    const achievements = Math.min(videosCompleted, 8);
+
+    setDashboardStats({
+      courses: totalCourses,
+      videosCompleted,
+      hoursLearnedSeconds: totalWatchedSeconds,
+      achievements,
+    });
+  }, [subjects, studentProgress]);
+
+  useEffect(() => {
+    // Only sync profileForm from userProfile when email changes (i.e., different user logs in)
+    // This prevents overwriting form inputs while the user is actively editing
+    setProfileForm({
+      firstName: userProfile.firstName || '',
+      lastName: userProfile.lastName || '',
+      nosId: userProfile.nosId || '',
+      dateOfBirth: userProfile.dateOfBirth || '',
+      gender: userProfile.gender || '',
+      email: userProfile.email || '',
+      phone: userProfile.phone || '',
+      address: userProfile.address || '',
+      stateCode: userProfile.stateCode || '',
+      district: userProfile.district || '',
+      pincode: userProfile.pincode || '',
+      class: userProfile.class || selectedClassRef.current || '',
+      parentName: userProfile.parentName || '',
+      parentPhone: userProfile.parentPhone || '',
+      school: userProfile.school || '',
+    });
+  }, [userProfile.email]);
+
+  async function handleLogin() {
+    try {
+      setAuthLoading(true);
+      setAuthError(null);
+
+      const email = (loginEmailRef.current?.value || '').trim();
+      const password = (loginPasswordRef.current?.value || '').trim();
+
+      if (!email || !password) {
+        raiseAuthError('Please enter email and password');
+        return;
+      }
+
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+
+      if (error) {
+        if (error.message?.toLowerCase().includes('invalid login credentials')) {
+          raiseAuthError('Account not found. Please register first.');
+        } else {
+          raiseAuthError(error.message);
+        }
+        return;
+      }
+
+      if (data?.user) {
+        setUser(data.user);
+        await hydrateUserFromSupabase(data.user);
+        showNotification('success', 'Welcome back!');
+      }
+    } catch (err) {
+      raiseAuthError(err.message || 'Login failed');
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  async function handleRegister() {
+    try {
+      setAuthLoading(true);
+      setAuthError(null);
+
+      const firstName = (registerFirstNameRef.current?.value || '').trim();
+      const lastName = (registerLastNameRef.current?.value || '').trim();
+      const email = (registerEmailRef.current?.value || '').trim();
+      const password = (registerPasswordRef.current?.value || '').trim();
+      const nosId = (registerNosIdRef.current?.value || '').trim();
+      const studentClass = registerClassRef.current?.value || '10';
+
+      if (!firstName || !email || !password) {
+        raiseAuthError('Please fill in name, email and password');
+        return;
+      }
+
+      const fullName = `${firstName} ${lastName}`.trim();
+
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          data: {
+            firstName,
+            lastName,
+            fullName,
+            nosId,
+            class: studentClass,
+          },
+        },
+      });
+
+      if (error) {
+        raiseAuthError(error.message);
+        return;
+      }
+
+      if (data?.user) {
+        setUser(data.user);
+        setSelectedClass(studentClass);
+
+        setUserProfile(prev => ({
+          ...prev,
+          firstName: firstName || prev.firstName,
+          lastName: lastName || prev.lastName,
+          email: email || prev.email,
+          nosId: nosId || prev.nosId,
+          class: studentClass || prev.class,
+        }));
+
+        setCurrentPage('editProfile');
+        showNotification('success', 'Account created! Complete your profile to continue.');
+      }
+    } catch (err) {
+      raiseAuthError(err.message || 'Registration failed');
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  async function handleForgotPassword() {
+    const email = (forgotEmailRef.current?.value || '').trim();
+    if (!email) {
+      showNotification('error', 'Please enter your registered email address.');
+      return;
+    }
+
+    try {
+      setForgotLoading(true);
+      const redirectTo = typeof window !== 'undefined'
+        ? `${window.location.origin}/reset-password`
+        : undefined;
+      const { error } = await supabase.auth.resetPasswordForEmail(
+        email,
+        redirectTo ? { redirectTo } : undefined,
+      );
+      if (error) {
+        showNotification('error', error.message || 'Could not send reset link.');
+        return;
+      }
+      showNotification('success', 'Password reset link sent. Please check your inbox.');
+    } catch (err) {
+      console.error('Error sending password reset email:', err);
+      showNotification('error', err.message || 'Unexpected error. Please try again.');
+    } finally {
+      setForgotLoading(false);
+    }
+  }
+
+  async function handleLogout() {
+    try {
+      await supabase.auth.signOut();
+    } catch (err) {
+      console.error('Error signing out of Supabase:', err);
+    } finally {
+      setUser(null);
+      setIsAdminUser(false);
+      setCurrentPage('landing');
+      showNotification('info', 'Signed out successfully.');
+    }
+  }
+
+  async function handleSaveProfile() {
+    try {
+      if (!user) {
+        raiseProfileError('You must be logged in to save your profile.');
+        return;
+      }
+
+      const updatedProfile = {
+        ...userProfile,
+        firstName: profileForm.firstName?.trim() || '',
+        lastName: profileForm.lastName?.trim() || '',
+        nosId: profileForm.nosId?.trim() || userProfile.nosId || '',
+        dateOfBirth: profileForm.dateOfBirth || '',
+        gender: profileForm.gender || '',
+        email: profileForm.email?.trim() || userProfile.email || '',
+        phone: profileForm.phone?.trim() || '',
+        address: profileForm.address?.trim() || '',
+        stateCode: profileForm.stateCode || '',
+        pincode: profileForm.pincode?.trim() || '',
+        district: profileForm.district || '',
+        class: profileForm.class || userProfile.class || selectedClass || '',
+        parentName: profileForm.parentName?.trim() || '',
+        parentPhone: profileForm.parentPhone?.trim() || '',
+        school: profileForm.school?.trim() || userProfile.school || '',
+      };
+
+      const missingFields = [];
+
+      if (!String(updatedProfile.firstName || '').trim()) missingFields.push('First name');
+      if (!String(updatedProfile.lastName || '').trim()) missingFields.push('Last name');
+      if (!String(updatedProfile.dateOfBirth || '').trim()) missingFields.push('Date of birth');
+      if (!String(updatedProfile.phone || '').trim()) missingFields.push('Phone number');
+      if (!String(updatedProfile.parentName || '').trim()) missingFields.push('Parent/Guardian name');
+      if (!String(updatedProfile.parentPhone || '').trim()) missingFields.push('Parent/Guardian phone');
+      if (!String(updatedProfile.class || '').trim()) missingFields.push('Class');
+      if (!String(updatedProfile.stateCode || '').trim()) missingFields.push('State');
+      if (!String(updatedProfile.district || '').trim()) missingFields.push('District');
+
+      if (missingFields.length > 0) {
+        raiseProfileError(`Please fill in: ${missingFields.join(', ')}.`);
+        return;
+      }
+
+      setProfileError(null);
+
+      const metadata = {
+        ...(user.user_metadata || {}),
+        firstName: updatedProfile.firstName,
+        lastName: updatedProfile.lastName,
+        fullName: `${updatedProfile.firstName} ${updatedProfile.lastName}`.trim(),
+        nosId: updatedProfile.nosId,
+        class: updatedProfile.class,
+        phone: updatedProfile.phone,
+        dateOfBirth: updatedProfile.dateOfBirth,
+        gender: updatedProfile.gender,
+        address: updatedProfile.address,
+        stateCode: updatedProfile.stateCode,
+        pincode: updatedProfile.pincode,
+        district: updatedProfile.district,
+        parentName: updatedProfile.parentName,
+        parentPhone: updatedProfile.parentPhone,
+        school: userProfile.school,
+        profileComplete: true,
+      };
+
+      const { data, error } = await supabase.auth.updateUser({
+        data: metadata,
+      });
+
+      if (error) {
+        console.error('Error saving profile to Supabase:', error);
+        raiseProfileError('Could not save profile. Please try again.');
+        return;
+      } else if (data?.user) {
+        setUser(data.user);
+        setUserProfile(updatedProfile);
+      }
+
+      const classId = parseInt(updatedProfile.class, 10);
+
+      const profileRow = {
+        id: user.id,
+        first_name: updatedProfile.firstName,
+        last_name: updatedProfile.lastName,
+        nos_id: updatedProfile.nosId,
+        class_id: Number.isNaN(classId) ? null : classId,
+        phone: updatedProfile.phone,
+        date_of_birth: updatedProfile.dateOfBirth || null,
+        avatar_url: userProfile.avatar || null,
+        parent_name: updatedProfile.parentName,
+        parent_phone: updatedProfile.parentPhone,
+        school: updatedProfile.school || null,
+        role: userRole || 'student',
+        district: updatedProfile.district || null,
+        state_code: updatedProfile.stateCode || null,
+        pincode: updatedProfile.pincode || null,
+        gender: updatedProfile.gender || null,
+      };
+
+      const { error: profileErrorDb } = await supabase
+        .from('student_profiles')
+        .upsert(profileRow, { onConflict: 'id' });
+
+      if (profileErrorDb) {
+        console.error('Error saving profile row to student_profiles:', profileErrorDb);
+        raiseProfileError('Could not save profile details. Please try again.');
+        return;
+      }
+
+      setProfileError(null);
+      setCurrentPage('profile');
+      showNotification('success', 'Profile updated successfully.');
+    } catch (err) {
+      console.error('Error saving profile to Supabase:', err);
+      raiseProfileError('Unexpected error while saving profile. Please try again.');
+    }
+  }
 
   // Settings State
   const [settings, setSettings] = useState({
@@ -325,8 +995,8 @@ export default function EduFreeApp() {
     soundEffects: true,
   });
 
-  // Notifications Data
-  const notifications = [
+  // Notifications Data (static placeholder for in-app notifications page)
+  const notificationFeed = [
     { id: 1, type: 'achievement', title: 'New Badge Earned!', message: 'You earned the "Week Warrior" badge for 7-day streak', time: '2 hours ago', read: false, icon: '🏆' },
     { id: 2, type: 'course', title: 'New Lesson Available', message: 'Chapter 5: Polynomials is now available in Mathematics', time: '5 hours ago', read: false, icon: '📚' },
     { id: 3, type: 'event', title: 'Event Reminder', message: 'Annual Sports Day is tomorrow at 9:00 AM', time: '1 day ago', read: true, icon: '🏃' },
@@ -377,23 +1047,70 @@ export default function EduFreeApp() {
     },
   ];
 
-  // Sample Data
-  const courses = [
-    { id: 1, title: 'Mathematics', subject: 'Algebra & Geometry', progress: 68, lessons: 24, completed: 16, thumbnail: '📐', color: '#FF6B35' },
-    { id: 2, title: 'Science', subject: 'Physics & Chemistry', progress: 45, lessons: 32, completed: 14, thumbnail: '🔬', color: '#4ECDC4' },
-    { id: 3, title: 'English', subject: 'Grammar & Literature', progress: 82, lessons: 28, completed: 23, thumbnail: '📚', color: '#9B59B6' },
-    { id: 4, title: 'Hindi', subject: 'Vyakaran & Sahitya', progress: 55, lessons: 20, completed: 11, thumbnail: '📖', color: '#E74C3C' },
-    { id: 5, title: 'Social Science', subject: 'History & Geography', progress: 30, lessons: 26, completed: 8, thumbnail: '🌍', color: '#3498DB' },
-    { id: 6, title: 'Computer Science', subject: 'Programming Basics', progress: 72, lessons: 18, completed: 13, thumbnail: '💻', color: '#1ABC9C' },
-  ];
+  const courseColors = ['#FF6B35', '#4ECDC4', '#9B59B6', '#E74C3C', '#3498DB', '#1ABC9C'];
+  const eventTypeColors = {
+    Sports: '#FF6B35',
+    Academic: '#3498DB',
+    Arts: '#9B59B6',
+    Cultural: '#E74C3C',
+    default: '#4ECDC4',
+  };
+  const eventTypeIcons = {
+    Sports: '🏃',
+    Academic: '📘',
+    Arts: '🎨',
+    Cultural: '🎭',
+    default: '📅',
+  };
 
-  const events = [
-    { id: 1, title: 'Annual Sports Day', date: 'Dec 15, 2025', time: '9:00 AM', type: 'Sports', location: 'School Ground', participants: 250, color: '#FF6B35' },
-    { id: 2, title: 'Science Exhibition', date: 'Dec 20, 2025', time: '10:00 AM', type: 'Academic', location: 'Main Hall', participants: 180, color: '#4ECDC4' },
-    { id: 3, title: 'Art Competition', date: 'Dec 25, 2025', time: '2:00 PM', type: 'Arts', location: 'Art Room', participants: 85, color: '#9B59B6' },
-    { id: 4, title: 'Music Festival', date: 'Jan 5, 2026', time: '5:00 PM', type: 'Cultural', location: 'Auditorium', participants: 120, color: '#E74C3C' },
-    { id: 5, title: 'Quiz Competition', date: 'Jan 10, 2026', time: '11:00 AM', type: 'Academic', location: 'Library', participants: 60, color: '#3498DB' },
-  ];
+  const filteredDistricts = useMemo(() => {
+    if (!profileForm.stateCode) {
+      return [];
+    }
+    return districtsList.filter(district => district.state_code === profileForm.stateCode);
+  }, [profileForm.stateCode, districtsList]);
+
+  const completedLessonIds = new Set(
+    studentProgress.filter(entry => entry.completed).map(entry => entry.lesson_id),
+  );
+
+  const filteredSubjects = subjects.filter(subject => {
+    if (!selectedClass) {
+      return true;
+    }
+    const subjectClassId = subject.class_id ?? subject.class ?? subject.classValue;
+    if (!subjectClassId) {
+      return true;
+    }
+    return String(subjectClassId) === String(selectedClass);
+  });
+
+  const courses = filteredSubjects.map((subject, index) => {
+    const color = subject.color || courseColors[index % courseColors.length];
+    const subjectKey = subject.id !== undefined && subject.id !== null ? String(subject.id) : null;
+    const lessonIds = subjectKey && subjectLessonMap[subjectKey] ? subjectLessonMap[subjectKey] : [];
+    const lessons = lessonIds.length;
+    const completed = lessonIds.reduce(
+      (count, lessonId) => count + (completedLessonIds.has(lessonId) ? 1 : 0),
+      0,
+    );
+    const progress = lessons > 0 ? Math.round((completed / lessons) * 100) : 0;
+
+    return {
+      id: subject.id ?? index + 1,
+      title:
+        subject.name ||
+        subject.title ||
+        subject.subject_name ||
+        `Subject ${index + 1}`,
+      subject: subject.description || subject.tagline || 'National Institute of Open Schooling (NIOS) Subject',
+      progress,
+      lessons,
+      completed,
+      thumbnail: subject.emoji || subject.icon || '📚',
+      color,
+    };
+  });
 
   const videoLessons = [
     { id: 1, title: 'Introduction to Quadratic Equations', duration: '18:45', completed: true },
@@ -611,7 +1328,7 @@ export default function EduFreeApp() {
               fontWeight: '600',
               marginBottom: '1.5rem',
             }}>
-              🎓 National Open Schooling • Class I to XII
+              🎓 National Institute of Open Schooling (NIOS) • Class I to XII
             </div>
             <h1 style={{
               fontSize: 'clamp(2.5rem, 5vw, 4rem)',
@@ -636,7 +1353,7 @@ export default function EduFreeApp() {
               marginBottom: '2rem',
               maxWidth: '500px',
             }}>
-              Free quality education for NOS students. Video tutorials, progress tracking, and exciting events — all in one place.
+              Free quality education for National Institute of Open Schooling (NIOS) students. Video tutorials, progress tracking, and exciting events — all in one place.
             </p>
             <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
               <button onClick={() => setCurrentPage('login')} style={{
@@ -784,13 +1501,13 @@ export default function EduFreeApp() {
               Everything You Need to <span style={{ color: '#FF6B35' }}>Succeed</span>
             </h2>
             <p style={{ color: 'rgba(255,255,255,0.6)', fontSize: '1.1rem', maxWidth: '600px', margin: '0 auto' }}>
-              Designed specifically for National Open Schooling students
+              Designed specifically for National Institute of Open Schooling (NIOS) students
             </p>
           </div>
           
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '2rem' }}>
             {[
-              { icon: '🎬', title: 'Video Tutorials', desc: 'High-quality video lessons for every subject, aligned with NOS curriculum', color: '#FF6B35' },
+              { icon: '🎬', title: 'Video Tutorials', desc: 'High-quality video lessons for every subject, aligned with the National Institute of Open Schooling (NIOS) curriculum', color: '#FF6B35' },
               { icon: '📊', title: 'Progress Tracking', desc: 'Monitor your learning journey with detailed analytics and insights', color: '#4ECDC4' },
               { icon: '🏆', title: 'Events & Activities', desc: 'Participate in sports, arts, and cultural events to grow holistically', color: '#9B59B6' },
               { icon: '📱', title: 'Learn Anywhere', desc: 'Access your courses on web or mobile, even offline', color: '#E74C3C' },
@@ -825,11 +1542,253 @@ export default function EduFreeApp() {
           </div>
         </div>
       </section>
+
+      {/* Pricing */}
+      <section style={{ padding: '6rem 2rem', background: '#0B1220' }}>
+        <div style={{ maxWidth: '1200px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '3rem' }}>
+          <div style={{ textAlign: 'center' }}>
+            <h2 style={{ fontSize: '2.5rem', fontWeight: '800', color: 'white', marginBottom: '0.5rem' }}>EduFree Pricing</h2>
+            <p style={{ color: 'rgba(255,255,255,0.65)', fontSize: '1.1rem' }}>Simple monthly plans for every stage of learning</p>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '1.5rem' }}>
+            {[
+              {
+                name: 'Primary Classes (1–5)',
+                price: '₹250',
+                unit: 'per month',
+                features: [
+                  'Daily online interactive classes',
+                  'Story-based learning & worksheets',
+                  'Arts/crafts + monthly offline activity',
+                  'Parent guidance & progress reports',
+                ],
+              },
+              {
+                name: 'Middle School (6–8)',
+                price: '₹300',
+                unit: 'per month',
+                features: [
+                  'Subject-wise online classes',
+                  'Weekly tests and early exam prep',
+                  'Assignments + project support',
+                  'Study planner & doubt clearing',
+                ],
+              },
+              {
+                name: 'NIOS Secondary/Sr. Secondary (9–12)',
+                price: '₹250',
+                unit: 'per month',
+                features: [
+                  'Online classes for chosen subjects',
+                  'NIOS admission & subject guidance',
+                  'Weekly tests and TMA support',
+                  'Offline arts/sports + WhatsApp help',
+                ],
+              },
+            ].map((plan) => (
+              <div key={plan.name} style={{
+                background: 'linear-gradient(145deg, rgba(255,255,255,0.04), rgba(255,255,255,0.02))',
+                borderRadius: '26px',
+                padding: '2rem',
+                border: '1px solid rgba(255,255,255,0.08)',
+              }}>
+                <h3 style={{ color: 'white', fontSize: '1.4rem', fontWeight: '700', marginBottom: '0.75rem' }}>{plan.name}</h3>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.4rem', marginBottom: '1.25rem' }}>
+                  <span style={{ fontSize: '2.6rem', fontWeight: '800', color: '#FF6B35' }}>{plan.price}</span>
+                  <span style={{ color: 'rgba(255,255,255,0.6)' }}>{plan.unit}</span>
+                </div>
+                <ul style={{ color: 'rgba(255,255,255,0.75)', lineHeight: 1.7, paddingLeft: '1.2rem' }}>
+                  {plan.features.map((feature) => (
+                    <li key={feature} style={{ marginBottom: '0.45rem' }}>{feature}</li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+          {/* Add-ons */}
+          <div style={{
+            background: 'linear-gradient(145deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02))',
+            borderRadius: '28px',
+            padding: '2.5rem',
+            border: '1px solid rgba(255,255,255,0.08)',
+          }}>
+            <h3 style={{ color: 'white', fontSize: '1.9rem', fontWeight: '800', marginBottom: '0.75rem' }}>Add-On Learning Packs (Optional)</h3>
+            <p style={{ color: 'rgba(255,255,255,0.65)', marginBottom: '1.5rem' }}>Parents can choose these extras only when needed.</p>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1rem' }}>
+              {[
+                { title: '1-on-1 Mentor Support', price: '₹200/month', desc: 'Weekly mentoring plus priority doubt solving.' },
+                { title: 'Exam Crash Course', price: '₹499 one-time', desc: '45-day intensive revision and mock tests.' },
+                { title: 'TMA Assistance Pack', price: '₹99/month', desc: 'Templates, corrections, and submission help.' },
+                { title: 'Printed Notes', price: '₹300–₹600', desc: 'Home-delivered printed materials.' },
+                { title: 'Skill Workshops', price: '₹199–₹399', desc: 'Workshops on English, Digital Skills, Coding, etc.' },
+                { title: 'Offline Events', price: '₹99–₹199 per event', desc: 'Sports and arts activity days.' },
+              ].map((addon) => (
+                <div key={addon.title} style={{
+                  border: '1px solid rgba(255,255,255,0.08)',
+                  borderRadius: '20px',
+                  padding: '1.25rem',
+                  background: 'rgba(255,255,255,0.02)',
+                }}>
+                  <h4 style={{ color: '#FFB347', fontSize: '1rem', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '0.35rem' }}>{addon.title}</h4>
+                  <div style={{ color: 'white', fontWeight: '700', marginBottom: '0.65rem' }}>{addon.price}</div>
+                  <p style={{ color: 'rgba(255,255,255,0.75)', lineHeight: 1.6 }}>{addon.desc}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+          {/* Family & scholarship */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '1.5rem' }}>
+            <div style={{
+              background: 'linear-gradient(145deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02))',
+              borderRadius: '26px',
+              padding: '2rem',
+              border: '1px solid rgba(255,255,255,0.08)',
+            }}>
+              <h3 style={{ color: 'white', fontSize: '1.4rem', fontWeight: '700', marginBottom: '0.5rem' }}>Family / Sibling Plan</h3>
+              <p style={{ color: '#FF6B35', fontSize: '2rem', fontWeight: '800', marginBottom: '0.5rem' }}>₹450<span style={{ fontSize: '1rem', fontWeight: '600', color: 'rgba(255,255,255,0.7)' }}> / month</span></p>
+              <p style={{ color: 'rgba(255,255,255,0.75)' }}>One fee covers up to 3 children with access to all EduFree learning plans.</p>
+            </div>
+            <div style={{
+              background: 'linear-gradient(145deg, rgba(34,197,94,0.15), rgba(34,197,94,0.05))',
+              borderRadius: '26px',
+              padding: '2rem',
+              border: '1px solid rgba(34,197,94,0.35)',
+            }}>
+              <h3 style={{ color: 'white', fontSize: '1.4rem', fontWeight: '700', marginBottom: '0.75rem' }}>Scholarship Support</h3>
+              <ul style={{ color: 'rgba(255,255,255,0.75)', lineHeight: 1.7, paddingLeft: '1.2rem' }}>
+                <li>Full Scholarship — Free</li>
+                <li>Half Scholarship — ₹150/month</li>
+                <li>Standard Fee — ₹250–₹300/month</li>
+              </ul>
+              <p style={{ color: 'rgba(255,255,255,0.65)', marginTop: '0.75rem' }}>Eligibility may require income verification or community recommendation.</p>
+            </div>
+            <div style={{
+              background: 'linear-gradient(145deg, rgba(248,113,113,0.12), rgba(248,113,113,0.05))',
+              borderRadius: '26px',
+              padding: '2rem',
+              border: '1px solid rgba(248,113,113,0.35)',
+            }}>
+              <h3 style={{ color: 'white', fontSize: '1.4rem', fontWeight: '700', marginBottom: '0.75rem' }}>Important: NIOS Fees</h3>
+              <p style={{ color: 'rgba(255,255,255,0.75)', marginBottom: '0.75rem' }}>NIOS admission & exam fees are separate and must be paid directly on the official portal. EduFree only provides guidance.</p>
+              <ul style={{ color: 'rgba(255,255,255,0.75)', lineHeight: 1.6, paddingLeft: '1.2rem' }}>
+                <li>Admission and exam fees (per subject)</li>
+                <li>Practical and additional subject fees</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Trust & Compliance */}
+      <section style={{ padding: '6rem 2rem', background: '#050914' }}>
+        <div style={{ maxWidth: '1200px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '3rem' }}>
+          {/* About */}
+          <div style={{
+            background: 'linear-gradient(145deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02))',
+            borderRadius: '28px',
+            padding: '2.5rem',
+            border: '1px solid rgba(255,255,255,0.08)',
+          }}>
+            <h2 style={{ fontSize: '2.2rem', fontWeight: '800', color: 'white', marginBottom: '1rem' }}>About EduFree</h2>
+            <p style={{ color: 'rgba(255,255,255,0.7)', lineHeight: 1.8, fontSize: '1.05rem', marginBottom: '1rem' }}>
+              EduFree is a digital learning support platform that provides high-quality online tutorials, structured learning materials, and academic guidance for students choosing flexible learning paths. We assist learners who wish to register under the National Institute of Open Schooling (NIOS) and support them throughout their academic journey.
+            </p>
+            <p style={{ color: 'rgba(255,255,255,0.7)', lineHeight: 1.8, fontSize: '1.05rem' }}>
+              EduFree is <strong>not</strong> a school and does not issue certificates. All academic certifications are issued directly by NIOS or the respective examination authority. Our role is to provide digital learning infrastructure, guidance, and supportive offline activities such as arts, sports, and community-based learning.
+            </p>
+          </div>
+
+          {/* Terms & Compliance */}
+          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '1.5rem', flexWrap: 'wrap' }}>
+            <div style={{
+              background: 'linear-gradient(145deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02))',
+              borderRadius: '24px',
+              padding: '2.25rem',
+              border: '1px solid rgba(255,255,255,0.08)',
+            }}>
+              <h3 style={{ color: 'white', fontSize: '1.75rem', fontWeight: '700', marginBottom: '1rem' }}>Terms & Conditions (Short)</h3>
+              <ol style={{ color: 'rgba(255,255,255,0.75)', lineHeight: 1.9, paddingLeft: '1.5rem', fontSize: '1rem' }}>
+                {[
+                  'EduFree provides digital educational support including online tutorials, study materials, exam preparation assistance, and help with NIOS registration.',
+                  'EduFree is not affiliated with NIOS, CBSE, ICSE, or any government board. EduFree does not issue academic certificates.',
+                  'All certificates are issued solely by the National Institute of Open Schooling (NIOS).',
+                  'Students must follow NIOS guidelines regarding examinations, assignments (TMA), and admissions.',
+                  'EduFree may provide arts, sports, workshops, or community sessions for overall development. These are supplementary and not formal schooling.',
+                  'Fees paid to EduFree are for educational support services and are non-refundable unless specified.',
+                  'EduFree collects and stores student information only for academic support and does not share it with third parties without consent.',
+                ].map(text => (
+                  <li key={text} style={{ marginBottom: '0.65rem' }}>{text}</li>
+                ))}
+              </ol>
+            </div>
+            <div style={{
+              background: 'linear-gradient(145deg, rgba(78,205,196,0.15), rgba(78,205,196,0.05))',
+              borderRadius: '24px',
+              padding: '2.25rem',
+              border: '1px solid rgba(78,205,196,0.4)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '1rem',
+            }}>
+              <h3 style={{ color: 'white', fontSize: '1.5rem', fontWeight: '700' }}>Compliance Statement</h3>
+              <p style={{ color: 'rgba(255,255,255,0.8)', lineHeight: 1.8 }}>
+                EduFree operates as a digital educational support service providing tutorials, guidance, and supplementary offline activities. EduFree is not a school and does not offer board-affiliated academic certification. All certifications and examinations are conducted solely by the National Institute of Open Schooling (NIOS). EduFree adheres to the guidelines of the Ministry of Education, India, and functions strictly as a tutoring and learning-support platform.
+              </p>
+            </div>
+          </div>
+
+          {/* Parent pitch */}
+          <div style={{
+            background: 'linear-gradient(145deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02))',
+            borderRadius: '28px',
+            padding: '2.5rem',
+            border: '1px solid rgba(255,255,255,0.08)',
+          }}>
+            <h3 style={{ color: 'white', fontSize: '2rem', fontWeight: '800', marginBottom: '0.5rem' }}>Why Choose EduFree?</h3>
+            <p style={{ color: 'rgba(255,255,255,0.6)', marginBottom: '2rem' }}>A one-page pitch for parents</p>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1.5rem' }}>
+              {[
+                { title: 'Digital Learning Support', desc: 'High-quality online classes for NIOS subjects with expert tutors.' },
+                { title: 'NIOS Registration Help', desc: 'We guide you step-by-step through the admission process.' },
+                { title: 'Structured Learning System', desc: 'Recorded classes, study notes, practice tests, and assignment guidance.' },
+                { title: 'Holistic Development', desc: 'Offline arts, sports, and activity-based sessions for overall growth.' },
+                { title: 'Individual Attention', desc: 'Mentors track progress and provide personalised learning plans.' },
+                { title: 'Future-Ready Skills', desc: 'Workshops on communication, digital skills, and practical knowledge.' },
+              ].map(item => (
+                <div key={item.title} style={{
+                  background: 'rgba(255,255,255,0.03)',
+                  borderRadius: '20px',
+                  padding: '1.5rem',
+                  border: '1px solid rgba(255,255,255,0.05)',
+                  minHeight: '210px',
+                }}>
+                  <h4 style={{ color: '#FFB347', fontSize: '1rem', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: '0.75rem' }}>{item.title}</h4>
+                  <p style={{ color: 'rgba(255,255,255,0.75)', lineHeight: 1.6 }}>{item.desc}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+
+        </div>
+      </section>
     </div>
   );
 
   // Dashboard Page
-  const DashboardPage = () => (
+  const DashboardPage = () => {
+    const fullName = `${userProfile.firstName} ${userProfile.lastName}`.trim() || 'Student';
+    const classLabel = userProfile.class ? `Class ${userProfile.class}` : selectedClass ? `Class ${selectedClass}` : 'Class';
+    const nosIdLabel = userProfile.nosId || '—';
+    const quickStats = [
+      { label: 'Courses Enrolled', value: dashboardStats.courses ?? 0, icon: '📚', color: '#FF6B35' },
+      { label: 'Videos Completed', value: dashboardStats.videosCompleted ?? 0, icon: '🎬', color: '#4ECDC4' },
+      { label: 'Hours Learned', value: formatDuration(dashboardStats.hoursLearnedSeconds), icon: '⏱️', color: '#9B59B6' },
+      { label: 'Achievements', value: dashboardStats.achievements ?? 0, icon: '🏆', color: '#E74C3C' },
+    ];
+
+    const profileClassLabel = userProfile.class || selectedClass || '—';
+
+    return (
     <div style={{ padding: '6rem 2rem 6rem', minHeight: '100vh', background: '#0F172A' }}>
       <div style={{ maxWidth: '1400px', margin: '0 auto' }}>
         {/* Welcome Section */}
@@ -846,17 +1805,17 @@ export default function EduFreeApp() {
         }}>
           <div>
             <h1 style={{ fontSize: '1.75rem', fontWeight: '700', color: 'white', marginBottom: '0.5rem' }}>
-              Welcome back, Arjun! 👋
+              Welcome back, {fullName}! 👋
             </h1>
             <p style={{ color: 'rgba(255,255,255,0.6)' }}>Continue your learning journey. You're doing great!</p>
             <div style={{ display: 'flex', gap: '2rem', marginTop: '1.5rem' }}>
               <div>
                 <div style={{ fontSize: '0.85rem', color: 'rgba(255,255,255,0.5)' }}>Current Class</div>
-                <div style={{ color: '#FF6B35', fontWeight: '700', fontSize: '1.25rem' }}>Class X</div>
+                <div style={{ color: '#FF6B35', fontWeight: '700', fontSize: '1.25rem' }}>{classLabel}</div>
               </div>
               <div>
-                <div style={{ fontSize: '0.85rem', color: 'rgba(255,255,255,0.5)' }}>NOS ID</div>
-                <div style={{ color: 'white', fontWeight: '600' }}>NOS-2024-78542</div>
+                <div style={{ fontSize: '0.85rem', color: 'rgba(255,255,255,0.5)' }}>NIOS ID</div>
+                <div style={{ color: 'white', fontWeight: '600' }}>{nosIdLabel}</div>
               </div>
               <div>
                 <div style={{ fontSize: '0.85rem', color: 'rgba(255,255,255,0.5)' }}>Streak</div>
@@ -883,12 +1842,7 @@ export default function EduFreeApp() {
 
         {/* Quick Stats */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1rem', marginBottom: '2rem' }}>
-          {[
-            { label: 'Courses Enrolled', value: '6', icon: '📚', color: '#FF6B35' },
-            { label: 'Videos Completed', value: '85', icon: '🎬', color: '#4ECDC4' },
-            { label: 'Hours Learned', value: '42', icon: '⏱️', color: '#9B59B6' },
-            { label: 'Achievements', value: '8', icon: '🏆', color: '#E74C3C' },
-          ].map(stat => (
+          {quickStats.map(stat => (
             <div key={stat.label} style={{
               background: 'linear-gradient(145deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02))',
               borderRadius: '20px',
@@ -998,49 +1952,70 @@ export default function EduFreeApp() {
               padding: '1.5rem',
               border: '1px solid rgba(255,255,255,0.08)',
             }}>
-              {events.slice(0, 3).map((event, idx) => (
-                <div key={event.id} style={{
-                  display: 'flex',
-                  gap: '1rem',
-                  alignItems: 'flex-start',
-                  padding: '1rem 0',
-                  borderBottom: idx < 2 ? '1px solid rgba(255,255,255,0.08)' : 'none',
-                }}>
-                  <div style={{
-                    width: '50px',
-                    height: '50px',
-                    background: `${event.color}22`,
-                    borderRadius: '12px',
+              {eventsLoading && (
+                <p style={{ color: 'rgba(255,255,255,0.6)' }}>Loading events...</p>
+              )}
+              {eventsError && (
+                <p style={{ color: '#fca5a5' }}>Error: {eventsError}</p>
+              )}
+              {!eventsLoading && !eventsError && events.slice(0, 3).map((event, idx) => {
+                const eventColor = eventTypeColors[event.event_type] || eventTypeColors.default;
+                const eventDate = event.event_date ? new Date(event.event_date) : null;
+                const day = eventDate ? eventDate.toLocaleDateString('en-US', { day: 'numeric' }) : '--';
+                const month = eventDate ? eventDate.toLocaleDateString('en-US', { month: 'short' }) : '';
+                const timeLabel = event.event_time ? event.event_time.slice(0, 5) : '';
+                return (
+                  <div key={event.id} style={{
                     display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    flexShrink: 0,
+                    gap: '1rem',
+                    alignItems: 'flex-start',
+                    padding: '1rem 0',
+                    borderBottom: idx < Math.min(2, events.length - 1) ? '1px solid rgba(255,255,255,0.08)' : 'none',
                   }}>
-                    <span style={{ fontSize: '0.7rem', color: event.color, fontWeight: '600' }}>{event.date.split(' ')[0]}</span>
-                    <span style={{ fontSize: '1rem', color: 'white', fontWeight: '700' }}>{event.date.split(' ')[1].replace(',', '')}</span>
+                    <div style={{
+                      width: '50px',
+                      height: '50px',
+                      background: `${eventColor}22`,
+                      borderRadius: '12px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0,
+                    }}>
+                      <span style={{ fontSize: '0.7rem', color: eventColor, fontWeight: '600' }}>{month}</span>
+                      <span style={{ fontSize: '1rem', color: 'white', fontWeight: '700' }}>{day}</span>
+                    </div>
+                    <div>
+                      <h4 style={{ color: 'white', fontWeight: '600', fontSize: '0.95rem', marginBottom: '0.25rem' }}>{event.title}</h4>
+                      <p style={{ color: 'rgba(255,255,255,0.5)', fontSize: '0.8rem' }}>
+                        {timeLabel} • {event.location || 'TBA'}
+                      </p>
+                    </div>
                   </div>
-                  <div>
-                    <h4 style={{ color: 'white', fontWeight: '600', fontSize: '0.95rem', marginBottom: '0.25rem' }}>{event.title}</h4>
-                    <p style={{ color: 'rgba(255,255,255,0.5)', fontSize: '0.8rem' }}>{event.time} • {event.location}</p>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
+              {!eventsLoading && !eventsError && events.length === 0 && (
+                <p style={{ color: 'rgba(255,255,255,0.6)' }}>No upcoming events yet.</p>
+              )}
             </div>
           </div>
         </div>
       </div>
     </div>
   );
+  };
 
   // Courses Page
-  const CoursesPage = () => (
+  const CoursesPage = () => {
+    const classDisplay = userProfile.class || selectedClass || '—';
+    return (
     <div style={{ padding: '6rem 2rem 6rem', minHeight: '100vh', background: '#0F172A' }}>
       <div style={{ maxWidth: '1400px', margin: '0 auto' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem', flexWrap: 'wrap', gap: '1rem' }}>
           <div>
             <h1 style={{ fontSize: '2rem', fontWeight: '800', color: 'white', marginBottom: '0.5rem' }}>My Courses</h1>
-            <p style={{ color: 'rgba(255,255,255,0.6)' }}>Class X - NOS Curriculum</p>
+            <p style={{ color: 'rgba(255,255,255,0.6)' }}>Class {classDisplay} • NIOS Curriculum</p>
           </div>
           <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
             <div style={{
@@ -1075,6 +2050,38 @@ export default function EduFreeApp() {
               ))}
             </select>
           </div>
+        </div>
+
+        {/* Subjects loaded from Supabase */}
+        <div style={{ marginBottom: '2rem' }}>
+          <h2 style={{ fontSize: '1.25rem', fontWeight: '700', color: 'white', marginBottom: '0.75rem' }}>
+            Subjects (from Supabase)
+          </h2>
+          {subjectsLoading && (
+            <p style={{ color: 'rgba(255,255,255,0.6)' }}>Loading subjects...</p>
+          )}
+          {subjectsError && (
+            <p style={{ color: '#fca5a5' }}>Error: {subjectsError}</p>
+          )}
+          {!subjectsLoading && !subjectsError && subjects.length > 0 && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+              {subjects.map((subject, index) => (
+                <span
+                  key={index}
+                  style={{
+                    padding: '0.5rem 0.9rem',
+                    borderRadius: '999px',
+                    background: 'rgba(255,255,255,0.06)',
+                    border: '1px solid rgba(255,255,255,0.12)',
+                    color: 'rgba(255,255,255,0.85)',
+                    fontSize: '0.85rem',
+                  }}
+                >
+                  {subject.name || subject.subject_name || JSON.stringify(subject)}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '1.5rem' }}>
@@ -1140,6 +2147,7 @@ export default function EduFreeApp() {
       </div>
     </div>
   );
+  }
 
   // Video Player Page
   const VideoPage = () => (
@@ -1486,77 +2494,116 @@ export default function EduFreeApp() {
           </div>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(350px, 1fr))', gap: '1.5rem' }}>
-          {events.map(event => (
-            <div key={event.id} onClick={() => { setSelectedEvent(event); setCurrentPage('eventDetail'); }} style={{
-              background: 'linear-gradient(145deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02))',
-              borderRadius: '24px',
-              overflow: 'hidden',
-              border: '1px solid rgba(255,255,255,0.08)',
-              cursor: 'pointer',
-              transition: 'transform 0.2s',
-            }}>
-              <div style={{
-                height: '120px',
-                background: `linear-gradient(135deg, ${event.color}55, ${event.color}22)`,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                position: 'relative',
-              }}>
-                <span style={{
-                  position: 'absolute',
-                  top: '1rem',
-                  left: '1rem',
-                  background: event.color,
-                  color: 'white',
-                  padding: '0.35rem 0.85rem',
-                  borderRadius: '50px',
-                  fontSize: '0.8rem',
-                  fontWeight: '600',
+        {eventsLoading && (
+          <p style={{ color: 'rgba(255,255,255,0.7)' }}>Loading events...</p>
+        )}
+        {eventsError && (
+          <p style={{ color: '#fca5a5' }}>Error loading events: {eventsError}</p>
+        )}
+        {!eventsLoading && !eventsError && (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(350px, 1fr))', gap: '1.5rem' }}>
+            {events.length === 0 && (
+              <p style={{ color: 'rgba(255,255,255,0.7)' }}>No events published yet.</p>
+            )}
+            {events.map(event => {
+              const eventColor = eventTypeColors[event.event_type] || eventTypeColors.default;
+              const eventIcon = eventTypeIcons[event.event_type] || eventTypeIcons.default;
+              const eventDate = event.event_date ? new Date(event.event_date) : null;
+              const dateLabel = eventDate ? eventDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '';
+              const timeLabel = event.event_time ? event.event_time.slice(0, 5) : '';
+
+              return (
+                <div key={event.id} onClick={() => { setSelectedEvent(event); setCurrentPage('eventDetail'); }} style={{
+                  background: 'linear-gradient(145deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02))',
+                  borderRadius: '24px',
+                  overflow: 'hidden',
+                  border: '1px solid rgba(255,255,255,0.08)',
+                  cursor: 'pointer',
+                  transition: 'transform 0.2s',
                 }}>
-                  {event.type}
-                </span>
-                <span style={{ fontSize: '3rem' }}>
-                  {event.type === 'Sports' ? '🏃' : event.type === 'Arts' ? '🎨' : event.type === 'Cultural' ? '🎭' : '📖'}
-                </span>
-              </div>
-              <div style={{ padding: '1.5rem' }}>
-                <h3 style={{ color: 'white', fontWeight: '700', fontSize: '1.2rem', marginBottom: '0.75rem' }}>{event.title}</h3>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '1.25rem' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'rgba(255,255,255,0.6)', fontSize: '0.9rem' }}>
-                    <Icons.Calendar /> {event.date} at {event.time}
+                  <div style={{
+                    height: '120px',
+                    background: `linear-gradient(135deg, ${eventColor}55, ${eventColor}22)`,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    position: 'relative',
+                  }}>
+                    <span style={{
+                      position: 'absolute',
+                      top: '1rem',
+                      left: '1rem',
+                      background: eventColor,
+                      color: 'white',
+                      padding: '0.35rem 0.85rem',
+                      borderRadius: '50px',
+                      fontSize: '0.8rem',
+                      fontWeight: '600',
+                    }}>
+                      {event.event_type || 'Event'}
+                    </span>
+                    <span style={{ fontSize: '3rem' }}>{eventIcon}</span>
                   </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'rgba(255,255,255,0.6)', fontSize: '0.9rem' }}>
-                    <Icons.MapPin /> {event.location}
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'rgba(255,255,255,0.6)', fontSize: '0.9rem' }}>
-                    <Icons.Users /> {event.participants} participants
+                  <div style={{ padding: '1.5rem' }}>
+                    <h3 style={{ color: 'white', fontWeight: '700', fontSize: '1.2rem', marginBottom: '0.75rem' }}>{event.title}</h3>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '1.25rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'rgba(255,255,255,0.6)', fontSize: '0.9rem' }}>
+                        <Icons.Calendar /> {dateLabel} {timeLabel && `at ${timeLabel}`}
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'rgba(255,255,255,0.6)', fontSize: '0.9rem' }}>
+                        <Icons.MapPin /> {event.location || 'TBA'}
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'rgba(255,255,255,0.6)', fontSize: '0.9rem' }}>
+                        <Icons.Users /> Max {event.max_participants || '—'} participants
+                      </div>
+                    </div>
+                    <button style={{
+                      width: '100%',
+                      padding: '0.85rem',
+                      background: `linear-gradient(135deg, ${eventColor}, ${eventColor}CC)`,
+                      border: 'none',
+                      borderRadius: '12px',
+                      color: 'white',
+                      fontWeight: '600',
+                      cursor: 'pointer',
+                    }}>
+                      Register Now
+                    </button>
                   </div>
                 </div>
-                <button style={{
-                  width: '100%',
-                  padding: '0.85rem',
-                  background: `linear-gradient(135deg, ${event.color}, ${event.color}CC)`,
-                  border: 'none',
-                  borderRadius: '12px',
-                  color: 'white',
-                  fontWeight: '600',
-                  cursor: 'pointer',
-                }}>
-                  Register Now
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );
 
   // Profile Page
-  const ProfilePage = () => (
-    <div style={{ padding: '6rem 2rem 6rem', minHeight: '100vh', background: '#0F172A' }}>
+  const ProfilePage = () => {
+    const profileMenuItems = [
+      { icon: <Icons.User />, label: 'Edit Profile', desc: 'Update your personal information', page: 'editProfile' },
+      { icon: <Icons.Award />, label: 'Certificates', desc: 'View earned certificates', page: 'certificates' },
+      { icon: <Icons.Bell />, label: 'Notifications', desc: 'Manage notification preferences', page: 'notifications' },
+      { icon: <Icons.Settings />, label: 'Settings', desc: 'App settings and preferences', page: 'settings' },
+      { icon: <Icons.HelpCircle />, label: 'Help & Support', desc: 'Get help and contact support', page: 'help' },
+      { icon: <Icons.LogOut />, label: 'Logout', desc: 'Sign out of your account', danger: true, page: 'landing' },
+    ];
+
+    if (isAdminUser) {
+      profileMenuItems.splice(profileMenuItems.length - 1, 0, {
+        icon: <Icons.Settings />,
+        label: 'Admin Panel',
+        desc: 'Create classes and subjects',
+        page: 'admin',
+      });
+    }
+    const stateName = statesList.find(state => state.code === userProfile.stateCode)?.name || userProfile.stateCode || '—';
+    const districtName = districtsList.find(district => district.code === userProfile.district)?.name || userProfile.district || '—';
+    const profileClassLabel = userProfile.class || selectedClass || '—';
+
+    return (
+      <div style={{ padding: '6rem 2rem 6rem', minHeight: '100vh', background: '#0F172A' }}>
       <div style={{ maxWidth: '800px', margin: '0 auto' }}>
         {/* Profile Header */}
         <div style={{
@@ -1582,10 +2629,14 @@ export default function EduFreeApp() {
             border: '4px solid #0F172A',
             boxShadow: '0 0 0 4px rgba(78, 205, 196, 0.3)',
           }}>
-            A
+            {userProfile.avatar || (userProfile.firstName ? userProfile.firstName[0] : 'A')}
           </div>
-          <h1 style={{ color: 'white', fontSize: '1.5rem', fontWeight: '700', marginBottom: '0.25rem' }}>Arjun Kumar</h1>
-          <p style={{ color: 'rgba(255,255,255,0.5)', marginBottom: '0.5rem' }}>arjun.kumar@email.com</p>
+          <h1 style={{ color: 'white', fontSize: '1.5rem', fontWeight: '700', marginBottom: '0.25rem' }}>
+            {`${userProfile.firstName} ${userProfile.lastName}`.trim() || 'Student'}
+          </h1>
+          <p style={{ color: 'rgba(255,255,255,0.5)', marginBottom: '0.5rem' }}>
+            {userProfile.email}
+          </p>
           <div style={{
             display: 'inline-block',
             background: 'rgba(255, 107, 53, 0.15)',
@@ -1595,7 +2646,10 @@ export default function EduFreeApp() {
             fontSize: '0.9rem',
             fontWeight: '600',
           }}>
-            Class X • NOS ID: NOS-2024-78542
+            {`Class ${profileClassLabel} • NIOS ID: ${userProfile.nosId || '—'}`}
+          </div>
+          <div style={{ marginTop: '0.5rem', color: 'rgba(255,255,255,0.6)', fontSize: '0.9rem' }}>
+            {stateName !== '—' ? `${districtName !== '—' ? `${districtName}, ` : ''}${stateName}` : 'Location not set'}
           </div>
         </div>
 
@@ -1607,7 +2661,7 @@ export default function EduFreeApp() {
           marginBottom: '1.5rem',
         }}>
           {[
-            { label: 'Courses', value: '6', color: '#FF6B35' },
+            { label: 'Courses', value: String(courses.length), color: '#FF6B35' },
             { label: 'Completed', value: '85', color: '#4ECDC4' },
             { label: 'Badges', value: '8', color: '#9B59B6' },
           ].map(stat => (
@@ -1631,20 +2685,22 @@ export default function EduFreeApp() {
           border: '1px solid rgba(255,255,255,0.08)',
           overflow: 'hidden',
         }}>
-          {[
-            { icon: <Icons.User />, label: 'Edit Profile', desc: 'Update your personal information', page: 'editProfile' },
-            { icon: <Icons.Award />, label: 'Certificates', desc: 'View earned certificates', page: 'certificates' },
-            { icon: <Icons.Bell />, label: 'Notifications', desc: 'Manage notification preferences', page: 'notifications' },
-            { icon: <Icons.Settings />, label: 'Settings', desc: 'App settings and preferences', page: 'settings' },
-            { icon: <Icons.HelpCircle />, label: 'Help & Support', desc: 'Get help and contact support', page: 'help' },
-            { icon: <Icons.LogOut />, label: 'Logout', desc: 'Sign out of your account', danger: true, page: 'landing' },
-          ].map((item, idx) => (
-            <div key={item.label} onClick={() => setCurrentPage(item.page)} style={{
+          {profileMenuItems.map((item, idx) => (
+            <div
+              key={item.label}
+              onClick={() => {
+                if (item.danger && item.page === 'landing') {
+                  handleLogout();
+                } else {
+                  setCurrentPage(item.page);
+                }
+              }}
+              style={{
               display: 'flex',
               alignItems: 'center',
               gap: '1rem',
               padding: '1.25rem 1.5rem',
-              borderBottom: idx < 5 ? '1px solid rgba(255,255,255,0.08)' : 'none',
+              borderBottom: idx < profileMenuItems.length - 1 ? '1px solid rgba(255,255,255,0.08)' : 'none',
               cursor: 'pointer',
               transition: 'background 0.2s',
             }}>
@@ -1672,7 +2728,8 @@ export default function EduFreeApp() {
         </div>
       </div>
     </div>
-  );
+    );
+  };
 
   // ============ LOGIN PAGE ============
   const LoginPage = () => (
@@ -1693,7 +2750,7 @@ export default function EduFreeApp() {
             boxShadow: '0 10px 30px rgba(255, 107, 53, 0.3)',
           }}>📚</div>
           <h1 style={{ fontSize: '2rem', fontWeight: '800', color: 'white' }}>Welcome to <span style={{ color: '#FF6B35' }}>EduFree</span></h1>
-          <p style={{ color: 'rgba(255,255,255,0.5)', marginTop: '0.5rem' }}>Your learning companion for NOS</p>
+          <p style={{ color: 'rgba(255,255,255,0.5)', marginTop: '0.5rem' }}>Your learning companion for National Institute of Open Schooling (NIOS)</p>
         </div>
 
         {/* Auth Tabs */}
@@ -1705,7 +2762,13 @@ export default function EduFreeApp() {
           marginBottom: '2rem',
         }}>
           {['login', 'register'].map(tab => (
-            <button key={tab} onClick={() => setAuthTab(tab)} style={{
+            <button
+              key={tab}
+              onClick={() => {
+                setAuthTab(tab);
+                setAuthError(null);
+              }}
+              style={{
               flex: 1,
               padding: '1rem',
               background: authTab === tab ? '#FF6B35' : 'transparent',
@@ -1729,7 +2792,7 @@ export default function EduFreeApp() {
             border: '1px solid rgba(255,255,255,0.08)',
           }}>
             <div style={{ marginBottom: '1.5rem' }}>
-              <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.9rem', display: 'block', marginBottom: '0.5rem' }}>NOS ID or Email</label>
+              <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.9rem', display: 'block', marginBottom: '0.5rem' }}>NIOS ID or Email</label>
               <div style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -1740,7 +2803,10 @@ export default function EduFreeApp() {
                 border: '1px solid rgba(255,255,255,0.1)',
               }}>
                 <Icons.Mail />
-                <input placeholder="Enter your NOS ID or email" style={{
+                <input
+                  ref={loginEmailRef}
+                  placeholder="Enter your email"
+                  style={{
                   flex: 1,
                   background: 'none',
                   border: 'none',
@@ -1763,7 +2829,11 @@ export default function EduFreeApp() {
                 border: '1px solid rgba(255,255,255,0.1)',
               }}>
                 <Icons.Lock />
-                <input type={showPassword ? 'text' : 'password'} placeholder="Enter your password" style={{
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  ref={loginPasswordRef}
+                  placeholder="Enter your password"
+                  style={{
                   flex: 1,
                   background: 'none',
                   border: 'none',
@@ -1784,7 +2854,16 @@ export default function EduFreeApp() {
               <span onClick={() => setCurrentPage('forgotPassword')} style={{ color: '#FF6B35', fontSize: '0.9rem', cursor: 'pointer' }}>Forgot Password?</span>
             </div>
 
-            <button onClick={() => setCurrentPage('dashboard')} style={{
+            {authError && (
+              <p style={{ color: '#fca5a5', fontSize: '0.9rem', marginBottom: '1rem' }}>
+                {authError}
+              </p>
+            )}
+
+            <button
+              onClick={handleLogin}
+              disabled={authLoading}
+              style={{
               width: '100%',
               padding: '1rem',
               background: 'linear-gradient(135deg, #FF6B35, #FF8F5E)',
@@ -1793,9 +2872,12 @@ export default function EduFreeApp() {
               color: 'white',
               fontSize: '1rem',
               fontWeight: '600',
-              cursor: 'pointer',
+              cursor: authLoading ? 'not-allowed' : 'pointer',
               boxShadow: '0 8px 25px rgba(255, 107, 53, 0.3)',
-            }}>Login</button>
+              opacity: authLoading ? 0.7 : 1,
+            }}>
+              {authLoading ? 'Logging in...' : 'Login'}
+            </button>
 
             <div style={{ textAlign: 'center', marginTop: '1.5rem' }}>
               <span style={{ color: 'rgba(255,255,255,0.5)' }}>Don't have an account? </span>
@@ -1813,7 +2895,10 @@ export default function EduFreeApp() {
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1.5rem' }}>
               <div>
                 <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.9rem', display: 'block', marginBottom: '0.5rem' }}>First Name</label>
-                <input placeholder="First name" style={{
+                <input
+                  ref={registerFirstNameRef}
+                  placeholder="First name"
+                  style={{
                   width: '100%',
                   background: 'rgba(255,255,255,0.05)',
                   border: '1px solid rgba(255,255,255,0.1)',
@@ -1825,7 +2910,10 @@ export default function EduFreeApp() {
               </div>
               <div>
                 <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.9rem', display: 'block', marginBottom: '0.5rem' }}>Last Name</label>
-                <input placeholder="Last name" style={{
+                <input
+                  ref={registerLastNameRef}
+                  placeholder="Last name"
+                  style={{
                   width: '100%',
                   background: 'rgba(255,255,255,0.05)',
                   border: '1px solid rgba(255,255,255,0.1)',
@@ -1838,8 +2926,11 @@ export default function EduFreeApp() {
             </div>
 
             <div style={{ marginBottom: '1.5rem' }}>
-              <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.9rem', display: 'block', marginBottom: '0.5rem' }}>NOS Enrollment ID</label>
-              <input placeholder="Enter your NOS ID (e.g., NOS-2024-XXXXX)" style={{
+              <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.9rem', display: 'block', marginBottom: '0.5rem' }}>NIOS Enrollment ID</label>
+              <input
+                ref={registerNosIdRef}
+                placeholder="Enter your NIOS ID (e.g., NIOS-2024-XXXXX)"
+                style={{
                 width: '100%',
                 background: 'rgba(255,255,255,0.05)',
                 border: '1px solid rgba(255,255,255,0.1)',
@@ -1852,7 +2943,11 @@ export default function EduFreeApp() {
 
             <div style={{ marginBottom: '1.5rem' }}>
               <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.9rem', display: 'block', marginBottom: '0.5rem' }}>Email</label>
-              <input type="email" placeholder="Enter your email" style={{
+              <input
+                type="email"
+                ref={registerEmailRef}
+                placeholder="Enter your email"
+                style={{
                 width: '100%',
                 background: 'rgba(255,255,255,0.05)',
                 border: '1px solid rgba(255,255,255,0.1)',
@@ -1865,7 +2960,10 @@ export default function EduFreeApp() {
 
             <div style={{ marginBottom: '1.5rem' }}>
               <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.9rem', display: 'block', marginBottom: '0.5rem' }}>Select Class</label>
-              <select style={{
+              <select
+                ref={registerClassRef}
+                defaultValue="10"
+                style={{
                 width: '100%',
                 background: 'rgba(255,255,255,0.05)',
                 border: '1px solid rgba(255,255,255,0.1)',
@@ -1882,7 +2980,11 @@ export default function EduFreeApp() {
 
             <div style={{ marginBottom: '2rem' }}>
               <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.9rem', display: 'block', marginBottom: '0.5rem' }}>Password</label>
-              <input type="password" placeholder="Create a password" style={{
+              <input
+                type="password"
+                ref={registerPasswordRef}
+                placeholder="Create a password"
+                style={{
                 width: '100%',
                 background: 'rgba(255,255,255,0.05)',
                 border: '1px solid rgba(255,255,255,0.1)',
@@ -1893,7 +2995,16 @@ export default function EduFreeApp() {
               }} />
             </div>
 
-            <button onClick={() => setCurrentPage('dashboard')} style={{
+            {authError && (
+              <p style={{ color: '#fca5a5', fontSize: '0.9rem', marginBottom: '1rem' }}>
+                {authError}
+              </p>
+            )}
+
+            <button
+              onClick={handleRegister}
+              disabled={authLoading}
+              style={{
               width: '100%',
               padding: '1rem',
               background: 'linear-gradient(135deg, #FF6B35, #FF8F5E)',
@@ -1902,9 +3013,12 @@ export default function EduFreeApp() {
               color: 'white',
               fontSize: '1rem',
               fontWeight: '600',
-              cursor: 'pointer',
+              cursor: authLoading ? 'not-allowed' : 'pointer',
               boxShadow: '0 8px 25px rgba(255, 107, 53, 0.3)',
-            }}>Create Account</button>
+              opacity: authLoading ? 0.7 : 1,
+            }}>
+              {authLoading ? 'Creating account...' : 'Create Account'}
+            </button>
 
             <div style={{ textAlign: 'center', marginTop: '1.5rem' }}>
               <span style={{ color: 'rgba(255,255,255,0.5)' }}>Already have an account? </span>
@@ -1968,7 +3082,11 @@ export default function EduFreeApp() {
               border: '1px solid rgba(255,255,255,0.1)',
             }}>
               <Icons.Mail />
-              <input type="email" placeholder="Enter your registered email" style={{
+              <input
+                type="email"
+                ref={forgotEmailRef}
+                placeholder="Enter your registered email"
+                style={{
                 flex: 1,
                 background: 'none',
                 border: 'none',
@@ -1979,7 +3097,11 @@ export default function EduFreeApp() {
             </div>
           </div>
 
-          <button style={{
+          <button
+            type="button"
+            onClick={handleForgotPassword}
+            disabled={forgotLoading}
+            style={{
             width: '100%',
             padding: '1rem',
             background: 'linear-gradient(135deg, #FF6B35, #FF8F5E)',
@@ -1988,8 +3110,11 @@ export default function EduFreeApp() {
             color: 'white',
             fontSize: '1rem',
             fontWeight: '600',
-            cursor: 'pointer',
-          }}>Send Reset Link</button>
+            cursor: forgotLoading ? 'not-allowed' : 'pointer',
+            opacity: forgotLoading ? 0.7 : 1,
+          }}>
+            {forgotLoading ? 'Sending reset link...' : 'Send Reset Link'}
+          </button>
         </div>
 
         <button onClick={() => setCurrentPage('login')} style={{
@@ -2009,7 +3134,11 @@ export default function EduFreeApp() {
   );
 
   // ============ EDIT PROFILE PAGE ============
-  const EditProfilePage = () => (
+  const EditProfilePage = () => {
+    const stateOptionExists = statesList.some((state) => state.code === profileForm.stateCode);
+    const districtOptionExists = filteredDistricts.some((district) => district.code === profileForm.district);
+
+    return (
     <div style={{ padding: '5rem 2rem 6rem', minHeight: '100vh', background: '#0F172A' }}>
       <div style={{ maxWidth: '800px', margin: '0 auto' }}>
         {/* Header */}
@@ -2030,6 +3159,20 @@ export default function EduFreeApp() {
           </button>
           <h1 style={{ fontSize: '1.5rem', fontWeight: '700', color: 'white' }}>Edit Profile</h1>
         </div>
+
+        {profileError && (
+          <div style={{
+            marginBottom: '1.5rem',
+            padding: '0.85rem 1rem',
+            borderRadius: '12px',
+            background: 'rgba(248, 113, 113, 0.12)',
+            border: '1px solid rgba(248, 113, 113, 0.5)',
+            color: '#fecaca',
+            fontSize: '0.9rem',
+          }}>
+            {profileError}
+          </div>
+        )}
 
         {/* Avatar Section */}
         <div style={{
@@ -2091,7 +3234,10 @@ export default function EduFreeApp() {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
             <div>
               <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85rem', display: 'block', marginBottom: '0.5rem' }}>First Name</label>
-              <input value={userProfile.firstName} onChange={(e) => setUserProfile({...userProfile, firstName: e.target.value})} style={{
+              <input
+                value={profileForm.firstName}
+                onChange={(e) => updateProfileForm('firstName', e.target.value)}
+                style={{
                 width: '100%',
                 background: 'rgba(255,255,255,0.05)',
                 border: '1px solid rgba(255,255,255,0.1)',
@@ -2103,7 +3249,10 @@ export default function EduFreeApp() {
             </div>
             <div>
               <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85rem', display: 'block', marginBottom: '0.5rem' }}>Last Name</label>
-              <input value={userProfile.lastName} onChange={(e) => setUserProfile({...userProfile, lastName: e.target.value})} style={{
+              <input
+                value={profileForm.lastName}
+                onChange={(e) => updateProfileForm('lastName', e.target.value)}
+                style={{
                 width: '100%',
                 background: 'rgba(255,255,255,0.05)',
                 border: '1px solid rgba(255,255,255,0.1)',
@@ -2115,7 +3264,11 @@ export default function EduFreeApp() {
             </div>
             <div>
               <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85rem', display: 'block', marginBottom: '0.5rem' }}>Date of Birth</label>
-              <input type="date" value={userProfile.dateOfBirth} onChange={(e) => setUserProfile({...userProfile, dateOfBirth: e.target.value})} style={{
+              <input
+                type="date"
+                value={profileForm.dateOfBirth}
+                onChange={(e) => updateProfileForm('dateOfBirth', e.target.value)}
+                style={{
                 width: '100%',
                 background: 'rgba(255,255,255,0.05)',
                 border: '1px solid rgba(255,255,255,0.1)',
@@ -2127,7 +3280,10 @@ export default function EduFreeApp() {
             </div>
             <div>
               <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85rem', display: 'block', marginBottom: '0.5rem' }}>Gender</label>
-              <select value={userProfile.gender} onChange={(e) => setUserProfile({...userProfile, gender: e.target.value})} style={{
+              <select
+                value={profileForm.gender}
+                onChange={(e) => updateProfileForm('gender', e.target.value)}
+                style={{
                 width: '100%',
                 background: 'rgba(255,255,255,0.05)',
                 border: '1px solid rgba(255,255,255,0.1)',
@@ -2159,7 +3315,11 @@ export default function EduFreeApp() {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
             <div>
               <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85rem', display: 'block', marginBottom: '0.5rem' }}>Email</label>
-              <input type="email" value={userProfile.email} onChange={(e) => setUserProfile({...userProfile, email: e.target.value})} style={{
+              <input
+                type="email"
+                value={profileForm.email}
+                onChange={(e) => updateProfileForm('email', e.target.value)}
+                style={{
                 width: '100%',
                 background: 'rgba(255,255,255,0.05)',
                 border: '1px solid rgba(255,255,255,0.1)',
@@ -2171,7 +3331,10 @@ export default function EduFreeApp() {
             </div>
             <div>
               <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85rem', display: 'block', marginBottom: '0.5rem' }}>Phone Number</label>
-              <input value={userProfile.phone} onChange={(e) => setUserProfile({...userProfile, phone: e.target.value})} style={{
+              <input
+                value={profileForm.phone}
+                onChange={(e) => updateProfileForm('phone', e.target.value)}
+                style={{
                 width: '100%',
                 background: 'rgba(255,255,255,0.05)',
                 border: '1px solid rgba(255,255,255,0.1)',
@@ -2183,7 +3346,10 @@ export default function EduFreeApp() {
             </div>
             <div style={{ gridColumn: '1 / -1' }}>
               <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85rem', display: 'block', marginBottom: '0.5rem' }}>Address</label>
-              <input value={userProfile.address} onChange={(e) => setUserProfile({...userProfile, address: e.target.value})} style={{
+              <input
+                value={profileForm.address}
+                onChange={(e) => updateProfileForm('address', e.target.value)}
+                style={{
                 width: '100%',
                 background: 'rgba(255,255,255,0.05)',
                 border: '1px solid rgba(255,255,255,0.1)',
@@ -2195,7 +3361,37 @@ export default function EduFreeApp() {
             </div>
             <div>
               <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85rem', display: 'block', marginBottom: '0.5rem' }}>State</label>
-              <input value={userProfile.state} onChange={(e) => setUserProfile({...userProfile, state: e.target.value})} style={{
+              <select
+                value={profileForm.stateCode}
+                onChange={(e) => updateProfileForm('stateCode', e.target.value)}
+                style={{
+                width: '100%',
+                background: 'rgba(255,255,255,0.05)',
+                border: '1px solid rgba(255,255,255,0.1)',
+                borderRadius: '12px',
+                padding: '0.75rem 1rem',
+                color: 'white',
+                outline: 'none',
+              }}>
+                <option value="" style={{ background: '#0F172A' }}>Select State</option>
+                {!stateOptionExists && profileForm.stateCode && (
+                  <option value={profileForm.stateCode} style={{ background: '#0F172A' }}>
+                    Current: {profileForm.stateCode}
+                  </option>
+                )}
+                {statesList.map((state) => (
+                  <option key={state.code} value={state.code} style={{ background: '#0F172A' }}>
+                    {state.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85rem', display: 'block', marginBottom: '0.5rem' }}>PIN Code</label>
+              <input
+                value={profileForm.pincode}
+                onChange={(e) => updateProfileForm('pincode', e.target.value)}
+                style={{
                 width: '100%',
                 background: 'rgba(255,255,255,0.05)',
                 border: '1px solid rgba(255,255,255,0.1)',
@@ -2206,16 +3402,34 @@ export default function EduFreeApp() {
               }} />
             </div>
             <div>
-              <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85rem', display: 'block', marginBottom: '0.5rem' }}>PIN Code</label>
-              <input value={userProfile.pincode} onChange={(e) => setUserProfile({...userProfile, pincode: e.target.value})} style={{
+              <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85rem', display: 'block', marginBottom: '0.5rem' }}>District</label>
+              <select
+                value={profileForm.district}
+                onChange={(e) => updateProfileForm('district', e.target.value)}
+                disabled={!profileForm.stateCode}
+                style={{
                 width: '100%',
                 background: 'rgba(255,255,255,0.05)',
                 border: '1px solid rgba(255,255,255,0.1)',
                 borderRadius: '12px',
                 padding: '0.75rem 1rem',
-                color: 'white',
+                color: profileForm.stateCode ? 'white' : 'rgba(255,255,255,0.5)',
                 outline: 'none',
-              }} />
+              }}>
+                <option value="" style={{ background: '#0F172A' }}>
+                  {profileForm.stateCode ? 'Select District' : 'Select a state first'}
+                </option>
+                {!districtOptionExists && profileForm.district && (
+                  <option value={profileForm.district} style={{ background: '#0F172A' }}>
+                    Current: {profileForm.district}
+                  </option>
+                )}
+                {filteredDistricts.map((district) => (
+                  <option key={district.code} value={district.code} style={{ background: '#0F172A' }}>
+                    {district.name}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
         </div>
@@ -2234,20 +3448,26 @@ export default function EduFreeApp() {
           
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
             <div>
-              <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85rem', display: 'block', marginBottom: '0.5rem' }}>NOS ID</label>
-              <input value={userProfile.nosId} disabled style={{
+              <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85rem', display: 'block', marginBottom: '0.5rem' }}>NIOS ID</label>
+              <input
+                value={profileForm.nosId}
+                onChange={(e) => updateProfileForm('nosId', e.target.value)}
+                style={{
                 width: '100%',
-                background: 'rgba(255,255,255,0.02)',
-                border: '1px solid rgba(255,255,255,0.05)',
+                background: 'rgba(255,255,255,0.05)',
+                border: '1px solid rgba(255,255,255,0.1)',
                 borderRadius: '12px',
                 padding: '0.75rem 1rem',
-                color: 'rgba(255,255,255,0.5)',
+                color: 'white',
                 outline: 'none',
               }} />
             </div>
             <div>
               <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85rem', display: 'block', marginBottom: '0.5rem' }}>Class</label>
-              <select value={userProfile.class} onChange={(e) => setUserProfile({...userProfile, class: e.target.value})} style={{
+              <select
+                value={profileForm.class || ''}
+                onChange={(e) => updateProfileForm('class', e.target.value)}
+                style={{
                 width: '100%',
                 background: 'rgba(255,255,255,0.05)',
                 border: '1px solid rgba(255,255,255,0.1)',
@@ -2256,9 +3476,14 @@ export default function EduFreeApp() {
                 color: 'white',
                 outline: 'none',
               }}>
-                {['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI', 'XII'].map(c => (
-                  <option key={c} value={c} style={{ background: '#1E293B' }}>Class {c}</option>
-                ))}
+                {[...Array(12)].map((_, i) => {
+                  const value = String(i + 1);
+                  return (
+                    <option key={value} value={value} style={{ background: '#1E293B' }}>
+                      Class {i + 1}
+                    </option>
+                  );
+                })}
               </select>
             </div>
           </div>
@@ -2279,7 +3504,10 @@ export default function EduFreeApp() {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
             <div>
               <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85rem', display: 'block', marginBottom: '0.5rem' }}>Parent/Guardian Name</label>
-              <input value={userProfile.parentName} onChange={(e) => setUserProfile({...userProfile, parentName: e.target.value})} style={{
+              <input
+                value={profileForm.parentName}
+                onChange={(e) => updateProfileForm('parentName', e.target.value)}
+                style={{
                 width: '100%',
                 background: 'rgba(255,255,255,0.05)',
                 border: '1px solid rgba(255,255,255,0.1)',
@@ -2291,7 +3519,10 @@ export default function EduFreeApp() {
             </div>
             <div>
               <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85rem', display: 'block', marginBottom: '0.5rem' }}>Parent/Guardian Phone</label>
-              <input value={userProfile.parentPhone} onChange={(e) => setUserProfile({...userProfile, parentPhone: e.target.value})} style={{
+              <input
+                value={profileForm.parentPhone}
+                onChange={(e) => updateProfileForm('parentPhone', e.target.value)}
+                style={{
                 width: '100%',
                 background: 'rgba(255,255,255,0.05)',
                 border: '1px solid rgba(255,255,255,0.1)',
@@ -2305,7 +3536,7 @@ export default function EduFreeApp() {
         </div>
 
         {/* Save Button */}
-        <button onClick={() => setCurrentPage('profile')} style={{
+        <button onClick={handleSaveProfile} style={{
           width: '100%',
           padding: '1rem',
           background: 'linear-gradient(135deg, #FF6B35, #FF8F5E)',
@@ -2320,6 +3551,7 @@ export default function EduFreeApp() {
       </div>
     </div>
   );
+  }
 
   // ============ CERTIFICATES PAGE ============
   const CertificatesPage = () => (
@@ -2460,10 +3692,10 @@ export default function EduFreeApp() {
   const NotificationsPage = () => {
     const [notifFilter, setNotifFilter] = useState('all');
     const filteredNotifications = notifFilter === 'all' 
-      ? notifications 
+      ? notificationFeed 
       : notifFilter === 'unread' 
-        ? notifications.filter(n => !n.read)
-        : notifications.filter(n => n.type === notifFilter);
+        ? notificationFeed.filter(n => !n.read)
+        : notificationFeed.filter(n => n.type === notifFilter);
 
     return (
       <div style={{ padding: '5rem 2rem 6rem', minHeight: '100vh', background: '#0F172A' }}>
@@ -3185,6 +4417,30 @@ export default function EduFreeApp() {
   // ============ EVENT DETAIL PAGE ============
   const EventDetailPage = () => {
     const event = selectedEvent || events[0];
+    if (!event) {
+      return (
+        <div style={{ padding: '5rem 2rem 6rem', minHeight: '100vh', background: '#0F172A', color: 'white', textAlign: 'center' }}>
+          <p>No event selected.</p>
+          <button onClick={() => setCurrentPage('events')} style={{
+            marginTop: '1rem',
+            background: 'none',
+            border: '1px solid rgba(255,255,255,0.3)',
+            borderRadius: '12px',
+            padding: '0.75rem 1.5rem',
+            color: 'white',
+            cursor: 'pointer',
+          }}>
+            Back to Events
+          </button>
+        </div>
+      );
+    }
+
+    const eventColor = eventTypeColors[event.event_type] || eventTypeColors.default;
+    const eventIcon = eventTypeIcons[event.event_type] || eventTypeIcons.default;
+    const eventDate = event.event_date ? new Date(event.event_date) : null;
+    const eventDateLabel = eventDate ? eventDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : '';
+    const eventTimeLabel = event.event_time ? event.event_time.slice(0, 5) : '';
     return (
       <div style={{ padding: '5rem 2rem 6rem', minHeight: '100vh', background: '#0F172A' }}>
         <div style={{ maxWidth: '800px', margin: '0 auto' }}>
@@ -3205,7 +4461,7 @@ export default function EduFreeApp() {
           {/* Event Banner */}
           <div style={{
             height: '200px',
-            background: `linear-gradient(135deg, ${event.color}66, ${event.color}22)`,
+            background: `linear-gradient(135deg, ${eventColor}66, ${eventColor}22)`,
             borderRadius: '24px',
             display: 'flex',
             alignItems: 'center',
@@ -3214,18 +4470,18 @@ export default function EduFreeApp() {
             position: 'relative',
           }}>
             <span style={{ fontSize: '5rem' }}>
-              {event.type === 'Sports' ? '🏃' : event.type === 'Arts' ? '🎨' : event.type === 'Cultural' ? '🎭' : '📖'}
+              {eventIcon}
             </span>
             <span style={{
               position: 'absolute',
               top: '1rem',
               left: '1rem',
-              background: event.color,
+              background: eventColor,
               color: 'white',
               padding: '0.5rem 1rem',
               borderRadius: '50px',
               fontWeight: '600',
-            }}>{event.type}</span>
+            }}>{event.event_type || 'Event'}</span>
           </div>
 
           {/* Event Info */}
@@ -3248,13 +4504,13 @@ export default function EduFreeApp() {
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  color: event.color,
+                  color: eventColor,
                 }}>
                   <Icons.Calendar />
                 </div>
                 <div>
                   <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: '0.85rem' }}>Date</div>
-                  <div style={{ color: 'white', fontWeight: '600' }}>{event.date}</div>
+                  <div style={{ color: 'white', fontWeight: '600' }}>{eventDateLabel}</div>
                 </div>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
@@ -3266,13 +4522,13 @@ export default function EduFreeApp() {
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  color: event.color,
+                  color: eventColor,
                 }}>
                   <Icons.Clock />
                 </div>
                 <div>
                   <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: '0.85rem' }}>Time</div>
-                  <div style={{ color: 'white', fontWeight: '600' }}>{event.time}</div>
+                  <div style={{ color: 'white', fontWeight: '600' }}>{eventTimeLabel || 'TBA'}</div>
                 </div>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
@@ -3284,7 +4540,7 @@ export default function EduFreeApp() {
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  color: event.color,
+                  color: eventColor,
                 }}>
                   <Icons.MapPin />
                 </div>
@@ -3302,34 +4558,33 @@ export default function EduFreeApp() {
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  color: event.color,
+                  color: eventColor,
                 }}>
                   <Icons.Users />
                 </div>
                 <div>
                   <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: '0.85rem' }}>Participants</div>
-                  <div style={{ color: 'white', fontWeight: '600' }}>{event.participants} registered</div>
+                  <div style={{ color: 'white', fontWeight: '600' }}>{event.max_participants || '—'} max</div>
                 </div>
               </div>
             </div>
 
             <h3 style={{ color: 'white', fontWeight: '600', marginBottom: '0.75rem' }}>About this Event</h3>
             <p style={{ color: 'rgba(255,255,255,0.6)', lineHeight: '1.8', marginBottom: '2rem' }}>
-              Join us for an exciting {event.title.toLowerCase()}! This event is open to all NOS students from Class I to XII. 
-              Come and showcase your talents, make new friends, and create lasting memories. Certificates will be awarded to all participants.
+              {event.description || 'Details will be shared soon.'}
             </p>
 
             <button style={{
               width: '100%',
               padding: '1rem',
-              background: `linear-gradient(135deg, ${event.color}, ${event.color}CC)`,
+              background: `linear-gradient(135deg, ${eventColor}, ${eventColor}CC)`,
               border: 'none',
               borderRadius: '14px',
               color: 'white',
               fontSize: '1rem',
               fontWeight: '600',
               cursor: 'pointer',
-              boxShadow: `0 8px 25px ${event.color}44`,
+              boxShadow: `0 8px 25px ${eventColor}44`,
             }}>Register for this Event</button>
           </div>
         </div>
@@ -3356,6 +4611,14 @@ export default function EduFreeApp() {
       case 'settings': return <SettingsPage />;
       case 'help': return <HelpPage />;
       case 'quiz': return <QuizPage />;
+      case 'admin':
+        return isAdminUser
+          ? <AdminPanel
+              onBack={() => setCurrentPage('dashboard')}
+              onSubjectsUpdated={() => setSubjectsReloadKey(prev => prev + 1)}
+              onNotify={showNotification}
+            />
+          : <DashboardPage />;
       default: return <LandingPage />;
     }
   };
@@ -3418,6 +4681,68 @@ export default function EduFreeApp() {
       <Navigation transparent={currentPage === 'landing'} />
       {renderPage()}
       {!['landing', 'login', 'forgotPassword', 'quiz'].includes(currentPage) && <BottomNav />}
+      {notifications.length > 0 && (
+        <div style={{
+          position: 'fixed',
+          top: '1.5rem',
+          right: '1.5rem',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '0.75rem',
+          zIndex: 1000,
+          pointerEvents: 'none',
+        }}>
+          {notifications.map((note) => {
+            const theme = toastThemes[note.type] || toastThemes.info;
+            return (
+              <div
+                key={note.id}
+                role="alert"
+                style={{
+                  minWidth: '280px',
+                  maxWidth: '360px',
+                  background: 'rgba(15, 23, 42, 0.95)',
+                  borderRadius: '16px',
+                  borderLeft: `4px solid ${theme.accent}`,
+                  padding: '1rem 1.25rem',
+                  boxShadow: '0 12px 30px rgba(0,0,0,0.35)',
+                  color: 'white',
+                  pointerEvents: 'auto',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.75rem' }}>
+                  <div style={{ fontSize: '1.35rem' }}>{theme.icon}</div>
+                  <div style={{ flex: 1 }}>
+                    <p style={{ margin: 0, fontWeight: 600, fontSize: '0.95rem' }}>
+                      {note.type === 'error'
+                        ? 'Something went wrong'
+                        : note.type === 'success'
+                          ? 'Success'
+                          : 'Notice'}
+                    </p>
+                    <p style={{ margin: '0.25rem 0 0', color: 'rgba(255,255,255,0.85)', fontSize: '0.9rem', lineHeight: 1.4 }}>
+                      {note.message}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => dismissNotification(note.id)}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: 'rgba(255,255,255,0.6)',
+                      cursor: 'pointer',
+                      padding: 0,
+                    }}
+                    aria-label="Dismiss notification"
+                  >
+                    <Icons.X />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
