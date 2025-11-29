@@ -1,5 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import AdminPanel from './AdminPanel.jsx';
+import SuperAdminDashboard from './SuperAdminDashboard.jsx';
+import StateAdminDashboard from './StateAdminDashboard.jsx';
+import DistrictCoordinatorDashboard from './DistrictCoordinatorDashboard.jsx';
+import TeacherDashboard from './TeacherDashboard.jsx';
 import { supabase } from './lib/supabase';
 
 // Custom Icons as SVG components
@@ -368,6 +371,7 @@ export default function EduFreeApp() {
   const forgotEmailRef = useRef(null);
   const [isAdminUser, setIsAdminUser] = useState(false);
   const [forgotLoading, setForgotLoading] = useState(false);
+  const adminRoutedRef = useRef(false);
 
   const showNotification = useCallback((type, message) => {
     if (!message) return;
@@ -417,13 +421,28 @@ export default function EduFreeApp() {
         .select('*')
         .eq('id', currentUser.id)
         .maybeSingle();
-      const { data: staffRow, error: staffError } = await supabase
+      const staffSelect = 'id, user_id, email, name, phone, role, state_code, district_code, subject_id, assigned_classes';
+      const userEmail = (currentUser.email || '').trim();
+      let { data: staffRow, error: staffError } = await supabase
         .from('staff')
-        .select('role, state_code, district_code, subject_id, assigned_classes')
+        .select(staffSelect)
         .eq('user_id', currentUser.id)
         .maybeSingle();
       if (staffError && staffError.code !== 'PGRST116') {
         console.error('Error loading staff profile from Supabase:', staffError);
+      }
+
+      if (!staffRow && userEmail) {
+        const { data: staffByEmail, error: staffByEmailError } = await supabase
+          .from('staff')
+          .select(staffSelect)
+          .eq('email', userEmail)
+          .maybeSingle();
+        if (staffByEmailError && staffByEmailError.code !== 'PGRST116') {
+          console.error('Error loading staff profile by email from Supabase:', staffByEmailError);
+        } else if (staffByEmail) {
+          staffRow = staffByEmail;
+        }
       }
 
       const role = staffRow?.role || 'student';
@@ -456,9 +475,7 @@ export default function EduFreeApp() {
       setUserRole(role);
       setIsAdminUser(role !== 'student');
       setUserProfile(nextProfile);
-      if (role !== 'student') {
-        setCurrentPage('admin');
-      } else {
+      if (role === 'student') {
         setCurrentPage(profileComplete ? 'dashboard' : 'editProfile');
       }
     } catch (err) {
@@ -860,11 +877,21 @@ export default function EduFreeApp() {
       console.error('Error signing out of Supabase:', err);
     } finally {
       setUser(null);
+      setStaffProfile(null);
+      setUserRole('student');
       setIsAdminUser(false);
+      adminRoutedRef.current = false;
       setCurrentPage('landing');
       showNotification('info', 'Signed out successfully.');
     }
   }
+
+  useEffect(() => {
+    if (staffProfile?.role && staffProfile.role !== 'student' && !adminRoutedRef.current) {
+      adminRoutedRef.current = true;
+      setCurrentPage('admin');
+    }
+  }, [staffProfile?.role]);
 
   async function handleSaveProfile() {
     try {
@@ -931,19 +958,6 @@ export default function EduFreeApp() {
         profileComplete: true,
       };
 
-      const { data, error } = await supabase.auth.updateUser({
-        data: metadata,
-      });
-
-      if (error) {
-        console.error('Error saving profile to Supabase:', error);
-        raiseProfileError('Could not save profile. Please try again.');
-        return;
-      } else if (data?.user) {
-        setUser(data.user);
-        setUserProfile(updatedProfile);
-      }
-
       const classId = parseInt(updatedProfile.class, 10);
 
       const profileRow = {
@@ -975,6 +989,22 @@ export default function EduFreeApp() {
         raiseProfileError('Could not save profile details. Please try again.');
         return;
       }
+
+      const { data, error } = await supabase.auth.updateUser({
+        data: metadata,
+      });
+
+      if (error) {
+        console.error('Error saving profile to Supabase:', error);
+        raiseProfileError('Profile saved partially. Please try again to update account.');
+        return;
+      }
+
+      if (data?.user) {
+        setUser(data.user);
+      }
+
+      setUserProfile(updatedProfile);
 
       setProfileError(null);
       setCurrentPage('profile');
@@ -1290,7 +1320,7 @@ export default function EduFreeApp() {
         minHeight: '100vh',
         display: 'flex',
         alignItems: 'center',
-        padding: '6rem 2rem 4rem',
+        padding: 'clamp(5rem, 10vw, 6rem) clamp(1rem, 4vw, 2rem) clamp(3rem, 6vw, 4rem)',
         position: 'relative',
         overflow: 'hidden',
       }}>
@@ -1316,7 +1346,16 @@ export default function EduFreeApp() {
           filter: 'blur(60px)',
         }} />
         
-        <div style={{ maxWidth: '1400px', margin: '0 auto', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4rem', alignItems: 'center', position: 'relative', zIndex: 1 }}>
+        <div style={{
+          maxWidth: '1400px',
+          margin: '0 auto',
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 500px), 1fr))',
+          gap: '4rem',
+          alignItems: 'center',
+          position: 'relative',
+          zIndex: 1
+        }}>
           <div>
             <div style={{
               display: 'inline-block',
@@ -1390,15 +1429,15 @@ export default function EduFreeApp() {
             </div>
             
             {/* Stats */}
-            <div style={{ display: 'flex', gap: '3rem', marginTop: '4rem' }}>
+            <div style={{ display: 'flex', gap: 'clamp(1.5rem, 4vw, 3rem)', marginTop: 'clamp(2rem, 5vw, 4rem)', flexWrap: 'wrap' }}>
               {[
                 { value: '50K+', label: 'Students' },
                 { value: '500+', label: 'Videos' },
                 { value: '12', label: 'Classes' },
               ].map(stat => (
                 <div key={stat.label}>
-                  <div style={{ fontSize: '2rem', fontWeight: '800', color: '#FF6B35' }}>{stat.value}</div>
-                  <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: '0.9rem' }}>{stat.label}</div>
+                  <div style={{ fontSize: 'clamp(1.5rem, 4vw, 2rem)', fontWeight: '800', color: '#FF6B35' }}>{stat.value}</div>
+                  <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: 'clamp(0.8rem, 2vw, 0.9rem)' }}>{stat.label}</div>
                 </div>
               ))}
             </div>
@@ -1495,18 +1534,18 @@ export default function EduFreeApp() {
       </section>
 
       {/* Features Section */}
-      <section id="features" style={{ padding: '6rem 2rem', background: '#0F172A' }}>
+      <section id="features" style={{ padding: 'clamp(3rem, 8vw, 6rem) clamp(1rem, 4vw, 2rem)', background: '#0F172A' }}>
         <div style={{ maxWidth: '1400px', margin: '0 auto' }}>
           <div style={{ textAlign: 'center', marginBottom: '4rem' }}>
-            <h2 style={{ fontSize: '2.5rem', fontWeight: '800', color: 'white', marginBottom: '1rem' }}>
+            <h2 style={{ fontSize: 'clamp(2rem, 4vw, 2.5rem)', fontWeight: '800', color: 'white', marginBottom: '1rem' }}>
               Everything You Need to <span style={{ color: '#FF6B35' }}>Succeed</span>
             </h2>
-            <p style={{ color: 'rgba(255,255,255,0.6)', fontSize: '1.1rem', maxWidth: '600px', margin: '0 auto' }}>
+            <p style={{ color: 'rgba(255,255,255,0.6)', fontSize: 'clamp(1rem, 2vw, 1.1rem)', maxWidth: '600px', margin: '0 auto' }}>
               Designed specifically for National Institute of Open Schooling (NIOS) students
             </p>
           </div>
-          
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '2rem' }}>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 280px), 1fr))', gap: '1.5rem' }}>
             {[
               { icon: '🎬', title: 'Video Tutorials', desc: 'High-quality video lessons for every subject, aligned with the National Institute of Open Schooling (NIOS) curriculum', color: '#FF6B35' },
               { icon: '📊', title: 'Progress Tracking', desc: 'Monitor your learning journey with detailed analytics and insights', color: '#4ECDC4' },
@@ -1545,13 +1584,13 @@ export default function EduFreeApp() {
       </section>
 
       {/* Pricing */}
-      <section style={{ padding: '6rem 2rem', background: '#0B1220' }}>
+      <section style={{ padding: 'clamp(3rem, 8vw, 6rem) clamp(1rem, 4vw, 2rem)', background: '#0B1220' }}>
         <div style={{ maxWidth: '1200px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '3rem' }}>
           <div style={{ textAlign: 'center' }}>
-            <h2 style={{ fontSize: '2.5rem', fontWeight: '800', color: 'white', marginBottom: '0.5rem' }}>EduFree Pricing</h2>
-            <p style={{ color: 'rgba(255,255,255,0.65)', fontSize: '1.1rem' }}>Simple monthly plans for every stage of learning</p>
+            <h2 style={{ fontSize: 'clamp(2rem, 4vw, 2.5rem)', fontWeight: '800', color: 'white', marginBottom: '0.5rem' }}>EduFree Pricing</h2>
+            <p style={{ color: 'rgba(255,255,255,0.65)', fontSize: 'clamp(1rem, 2vw, 1.1rem)' }}>Simple monthly plans for every stage of learning</p>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '1.5rem' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 280px), 1fr))', gap: '1.5rem' }}>
             {[
               {
                 name: 'Primary Classes (1–5)',
@@ -1610,12 +1649,12 @@ export default function EduFreeApp() {
           <div style={{
             background: 'linear-gradient(145deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02))',
             borderRadius: '28px',
-            padding: '2.5rem',
+            padding: 'clamp(1.5rem, 4vw, 2.5rem)',
             border: '1px solid rgba(255,255,255,0.08)',
           }}>
-            <h3 style={{ color: 'white', fontSize: '1.9rem', fontWeight: '800', marginBottom: '0.75rem' }}>Add-On Learning Packs (Optional)</h3>
-            <p style={{ color: 'rgba(255,255,255,0.65)', marginBottom: '1.5rem' }}>Parents can choose these extras only when needed.</p>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1rem' }}>
+            <h3 style={{ color: 'white', fontSize: 'clamp(1.5rem, 3vw, 1.9rem)', fontWeight: '800', marginBottom: '0.75rem' }}>Add-On Learning Packs (Optional)</h3>
+            <p style={{ color: 'rgba(255,255,255,0.65)', fontSize: 'clamp(0.9rem, 2vw, 1rem)', marginBottom: '1.5rem' }}>Parents can choose these extras only when needed.</p>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 240px), 1fr))', gap: '1rem' }}>
               {[
                 { title: '1-on-1 Mentor Support', price: '₹200/month', desc: 'Weekly mentoring plus priority doubt solving.' },
                 { title: 'Exam Crash Course', price: '₹499 one-time', desc: '45-day intensive revision and mock tests.' },
@@ -1638,7 +1677,7 @@ export default function EduFreeApp() {
             </div>
           </div>
           {/* Family & scholarship */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '1.5rem' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 280px), 1fr))', gap: '1.5rem' }}>
             <div style={{
               background: 'linear-gradient(145deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02))',
               borderRadius: '26px',
@@ -1681,16 +1720,16 @@ export default function EduFreeApp() {
       </section>
 
       {/* Trust & Compliance */}
-      <section style={{ padding: '6rem 2rem', background: '#050914' }}>
+      <section style={{ padding: 'clamp(3rem, 8vw, 6rem) clamp(1rem, 4vw, 2rem)', background: '#050914' }}>
         <div style={{ maxWidth: '1200px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '3rem' }}>
           {/* About */}
           <div style={{
             background: 'linear-gradient(145deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02))',
             borderRadius: '28px',
-            padding: '2.5rem',
+            padding: 'clamp(1.5rem, 4vw, 2.5rem)',
             border: '1px solid rgba(255,255,255,0.08)',
           }}>
-            <h2 style={{ fontSize: '2.2rem', fontWeight: '800', color: 'white', marginBottom: '1rem' }}>About EduFree</h2>
+            <h2 style={{ fontSize: 'clamp(1.75rem, 4vw, 2.2rem)', fontWeight: '800', color: 'white', marginBottom: '1rem' }}>About EduFree</h2>
             <p style={{ color: 'rgba(255,255,255,0.7)', lineHeight: 1.8, fontSize: '1.05rem', marginBottom: '1rem' }}>
               EduFree is a digital learning support platform that provides high-quality online tutorials, structured learning materials, and academic guidance for students choosing flexible learning paths. We assist learners who wish to register under the National Institute of Open Schooling (NIOS) and support them throughout their academic journey.
             </p>
@@ -1700,14 +1739,14 @@ export default function EduFreeApp() {
           </div>
 
           {/* Terms & Compliance */}
-          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '1.5rem', flexWrap: 'wrap' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 350px), 1fr))', gap: '1.5rem' }}>
             <div style={{
               background: 'linear-gradient(145deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02))',
               borderRadius: '24px',
-              padding: '2.25rem',
+              padding: 'clamp(1.5rem, 4vw, 2.25rem)',
               border: '1px solid rgba(255,255,255,0.08)',
             }}>
-              <h3 style={{ color: 'white', fontSize: '1.75rem', fontWeight: '700', marginBottom: '1rem' }}>Terms & Conditions (Short)</h3>
+              <h3 style={{ color: 'white', fontSize: 'clamp(1.3rem, 3vw, 1.75rem)', fontWeight: '700', marginBottom: '1rem' }}>Terms & Conditions (Short)</h3>
               <ol style={{ color: 'rgba(255,255,255,0.75)', lineHeight: 1.9, paddingLeft: '1.5rem', fontSize: '1rem' }}>
                 {[
                   'EduFree provides digital educational support including online tutorials, study materials, exam preparation assistance, and help with NIOS registration.',
@@ -1725,13 +1764,13 @@ export default function EduFreeApp() {
             <div style={{
               background: 'linear-gradient(145deg, rgba(78,205,196,0.15), rgba(78,205,196,0.05))',
               borderRadius: '24px',
-              padding: '2.25rem',
+              padding: 'clamp(1.5rem, 4vw, 2.25rem)',
               border: '1px solid rgba(78,205,196,0.4)',
               display: 'flex',
               flexDirection: 'column',
               gap: '1rem',
             }}>
-              <h3 style={{ color: 'white', fontSize: '1.5rem', fontWeight: '700' }}>Compliance Statement</h3>
+              <h3 style={{ color: 'white', fontSize: 'clamp(1.2rem, 3vw, 1.5rem)', fontWeight: '700' }}>Compliance Statement</h3>
               <p style={{ color: 'rgba(255,255,255,0.8)', lineHeight: 1.8 }}>
                 EduFree operates as a digital educational support service providing tutorials, guidance, and supplementary offline activities. EduFree is not a school and does not offer board-affiliated academic certification. All certifications and examinations are conducted solely by the National Institute of Open Schooling (NIOS). EduFree adheres to the guidelines of the Ministry of Education, India, and functions strictly as a tutoring and learning-support platform.
               </p>
@@ -1742,12 +1781,12 @@ export default function EduFreeApp() {
           <div style={{
             background: 'linear-gradient(145deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02))',
             borderRadius: '28px',
-            padding: '2.5rem',
+            padding: 'clamp(1.5rem, 4vw, 2.5rem)',
             border: '1px solid rgba(255,255,255,0.08)',
           }}>
-            <h3 style={{ color: 'white', fontSize: '2rem', fontWeight: '800', marginBottom: '0.5rem' }}>Why Choose EduFree?</h3>
-            <p style={{ color: 'rgba(255,255,255,0.6)', marginBottom: '2rem' }}>A one-page pitch for parents</p>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1.5rem' }}>
+            <h3 style={{ color: 'white', fontSize: 'clamp(1.5rem, 3vw, 2rem)', fontWeight: '800', marginBottom: '0.5rem' }}>Why Choose EduFree?</h3>
+            <p style={{ color: 'rgba(255,255,255,0.6)', fontSize: 'clamp(0.9rem, 2vw, 1rem)', marginBottom: '2rem' }}>A one-page pitch for parents</p>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 240px), 1fr))', gap: '1.5rem' }}>
               {[
                 { title: 'Digital Learning Support', desc: 'High-quality online classes for NIOS subjects with expert tutors.' },
                 { title: 'NIOS Registration Help', desc: 'We guide you step-by-step through the admission process.' },
@@ -2595,7 +2634,7 @@ export default function EduFreeApp() {
       profileMenuItems.splice(profileMenuItems.length - 1, 0, {
         icon: <Icons.Settings />,
         label: 'Admin Panel',
-        desc: 'Create classes and subjects',
+        desc: 'Open your admin tools',
         page: 'admin',
       });
     }
@@ -4593,6 +4632,39 @@ export default function EduFreeApp() {
     );
   };
 
+  const renderAdminPortal = () => {
+    switch (staffProfile.role) {
+      case 'super_admin':
+        return <SuperAdminDashboard userRole={staffProfile} onLogout={handleLogout} />;
+      case 'state_admin':
+        return (
+          <StateAdminDashboard
+            userRole={staffProfile}
+            stateCode={staffProfile.state_code}
+            onLogout={handleLogout}
+          />
+        );
+      case 'district_coordinator':
+        return (
+          <DistrictCoordinatorDashboard
+            userRole={staffProfile}
+            districtCode={staffProfile.district_code}
+            onLogout={handleLogout}
+          />
+        );
+      case 'subject_teacher':
+        return (
+          <TeacherDashboard
+            userRole={staffProfile}
+            teacherId={staffProfile.id}
+            onLogout={handleLogout}
+          />
+        );
+      default:
+        return <DashboardPage />;
+    }
+  };
+
   // Render current page
   const renderPage = () => {
     switch (currentPage) {
@@ -4613,13 +4685,7 @@ export default function EduFreeApp() {
       case 'help': return <HelpPage />;
       case 'quiz': return <QuizPage />;
       case 'admin':
-        return isAdminUser
-          ? <AdminPanel
-              onBack={() => setCurrentPage('dashboard')}
-              onSubjectsUpdated={() => setSubjectsReloadKey(prev => prev + 1)}
-              onNotify={showNotification}
-            />
-          : <DashboardPage />;
+        return isAdminUser ? renderAdminPortal() : <DashboardPage />;
       default: return <LandingPage />;
     }
   };

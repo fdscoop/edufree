@@ -96,6 +96,26 @@ edufree/
 - Register for events
 - Track registered events
 
+## Role-Based Admin Dashboards
+
+EduFree now includes dedicated admin experiences that match the roles stored in the Supabase `staff` table. When a logged-in user has a non-`student` role, the **Admin Panel** tile on the Profile page opens the correct dashboard automatically.
+
+- **Super Admin (`super_admin`)** – see platform-wide metrics, states, staff, and students. You can also invite new state admins directly from the UI.
+- **State Admin (`state_admin`)** – manage districts within the assigned state, create district coordinators, and review teachers/students for that state.
+- **District Coordinator (`district_coordinator`)** – recruit teachers, review students inside the district, and build teacher ↔ student assignments.
+- **Teacher (`subject_teacher`)** – view assigned students, inspect lesson progress, and upload new lessons (YouTube IDs) for their subject.
+
+### Enabling the dashboards
+1. Ensure the desired Supabase user has a matching row in the `staff` table with one of the roles listed above (and `is_active = true`).
+2. Apply the provided RLS policies so that each role is allowed to read/write the data it needs.
+3. Sign in; the Profile → Admin Panel button will take you to the correct dashboard. Use the Logout button inside the dashboard to sign out when you are done.
+
+For a deeper walkthrough (RLS SQL, role workflows, schema mapping, etc.) see `src/README.md`.
+
+### Staff role matrix
+
+Full details on capabilities and SQL helpers for each staff role (`super_admin`, `state_admin`, `district_coordinator`, `subject_teacher`) are documented in [`docs/STAFF_ROLES.md`](docs/STAFF_ROLES.md).
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
